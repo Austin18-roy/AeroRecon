@@ -1625,21 +1625,6 @@ with cmp_right:
         """,
         unsafe_allow_html=True,
     )
-
-# Show the target image
-ASSETS_DIR = ROOT / "assets"
-anysplat_img_path = ASSETS_DIR / "anysplat_target.jpg"
-if anysplat_img_path.exists():
-    st.image(
-        str(anysplat_img_path),
-        caption=(
-            "Target output: Dense 3D Gaussian Splatting (AnySplat) — photorealistic aerial scene reconstruction "
-            "with camera frustums and flight trajectory overlay. "
-            "Source: InternRobotics/AnySplat (github.com/InternRobotics/AnySplat)"
-        ),
-        width="stretch",
-    )
-
 # Comparison table
 st.markdown("#### Reconstruction Method Comparison")
 st.markdown(
