@@ -1,0 +1,20 @@
+{
+  "name": "aerorecon",
+  "version": "1.0.0",
+  "description": "AeroRecon - AI-Assisted Drone 3D Reconstruction Dashboard",
+  "scripts": {
+    "dev": ".venv\\Scripts\\python.exe -m streamlit run app.py",
+    "start": ".venv\\Scripts\\python.exe -m streamlit run app.py",
+    "app": ".venv\\Scripts\\python.exe -m streamlit run app.py"
+  },
+  "keywords": [
+    "drone",
+    "3d-reconstruction",
+    "colmap",
+    "depth-anything",
+    "yolo11",
+    "streamlit"
+  ],
+  "author": "Austin18-roy",
+  "license": "MIT"
+}
