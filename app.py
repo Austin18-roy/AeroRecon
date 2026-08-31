@@ -977,6 +977,17 @@ if is_custom_mode:
             )
             st.plotly_chart(alt_fig, width="stretch")
 
+        with st.expander("🎮 **Interactive Three.js WebGL 3D Textured Surface Mesh Renderer**", expanded=True):
+            st.markdown(
+                "Direct WebGL hardware-accelerated 3D textured surface mesh renderer with directional sunlight, "
+                "procedural architectural facades, white camera wireframe frustums, and floating HUD analytics."
+            )
+            threejs_html_path = ROOT / "web" / "index.html"
+            if threejs_html_path.exists():
+                with open(threejs_html_path, "r", encoding="utf-8") as f_html:
+                    threejs_code = f_html.read()
+                st.components.v1.html(threejs_code, height=720, scrolling=False)
+
         st.markdown("##### 📅 Pipeline Stage Status")
         ss1, ss2, ss3, ss4 = st.columns(4)
         with ss1:

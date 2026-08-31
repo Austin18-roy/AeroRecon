@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AeroRecon | WebGL 3D Mesh & Photogrammetry Viewer</title>
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;900&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+    }
+
+    body, html {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: #0A0E17;
+      font-family: 'Inter', sans-serif;
+      color: #F8FAFC;
+    }
+
+    #webgl-canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    /* ── Top Navigation Bar ────────────────────────────────────────── */
+    .top-bar {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 56px;
+      background: rgba(10, 14, 23, 0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid rgba(56, 189, 248, 0.2);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 24px;
+      z-index: 100;
+    }
+
+    .brand-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 1.1rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      color: #F8FAFC;
+    }
+
+    .brand-title span {
+      color: #38BDF8;
+    }
+
+    .badge-mvd {
+      font-size: 0.68rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      padding: 3px 8px;
+      background: rgba(34, 197, 94, 0.15);
+      color: #22C55E;
+      border: 1px solid rgba(34, 197, 94, 0.3);
+      border-radius: 4px;
+    }
+
+    .view-controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .btn-ctrl {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: #94A3B8;
+      padding: 6px 12px;
+      font-size: 0.76rem;
+      font-weight: 600;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .btn-ctrl:hover, .btn-ctrl.active {
+      background: rgba(56, 189, 248, 0.2);
+      border-color: #38BDF8;
+      color: #38BDF8;
+    }
+
+    /* ── Floating Aerospace HUD Telemetry Panel ───────────────────────── */
+    .hud-panel {
+      position: absolute;
+      top: 76px;
+      right: 24px;
+      width: 320px;
+      background: rgba(10, 14, 23, 0.90);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      border-radius: 12px;
+      padding: 16px;
+      z-index: 100;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .hud-header {
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: #38BDF8;
+      margin-bottom: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .hud-status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #22C55E;
+      box-shadow: 0 0 8px #22C55E;
+    }
+
+    .hud-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.75rem;
+      padding: 4px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .hud-label {
+      color: #94A3B8;
+    }
+
+    .hud-val {
+      color: #F8FAFC;
+      font-weight: 600;
+    }
+
+    .hud-val.accent {
+      color: #38BDF8;
+    }
+
+    .hud-val.success {
+      color: #22C55E;
+    }
+
+    .hud-val.warning {
+      color: #FBBF24;
+    }
+
+    /* ── Bottom Flight Telemetry Bar ─────────────────────────────────── */
+    .telemetry-bar {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(10, 14, 23, 0.88);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      border-radius: 30px;
+      padding: 8px 24px;
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      z-index: 100;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem;
+    }
+
+    .t-item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .t-label {
+      font-size: 0.60rem;
+      color: #64748B;
+      text-transform: uppercase;
+    }
+
+    .t-value {
+      font-weight: 700;
+      color: #38BDF8;
+    }
+
+    /* ── Layer Toggles (Bottom Left) ─────────────────────────────────── */
+    .layer-panel {
+      position: absolute;
+      bottom: 20px;
+      left: 24px;
+      background: rgba(10, 14, 23, 0.88);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(56, 189, 248, 0.2);
+      border-radius: 10px;
+      padding: 12px 16px;
+      z-index: 100;
+      font-size: 0.72rem;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .layer-panel label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      color: #CBD5E1;
+    }
+
+    .layer-panel input[type="checkbox"] {
+      accent-color: #38BDF8;
+    }
+  </style>
+
+  <!-- Three.js & OrbitControls from CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+</head>
+<body>
+
+  <!-- Top Navigation Header -->
+  <div class="top-bar">
+    <div class="brand-title">
+      🚁 AeroRecon <span>3D Surface Mesh</span>
+      <div class="badge-mvd">Poisson Photogrammetry</div>
+    </div>
+    <div class="view-controls">
+      <button class="btn-ctrl active" onclick="setView('orbit')">Orbit (45°)</button>
+      <button class="btn-ctrl" onclick="setView('top')">Nadir Top-Down</button>
+      <button class="btn-ctrl" onclick="setView('front')">Front Elevation</button>
+      <button class="btn-ctrl" onclick="setView('cockpit')">Drone Cockpit</button>
+      <button class="btn-ctrl" id="btn-anim" onclick="toggleAnimation()">▶ Animate Flight</button>
+    </div>
+  </div>
+
+  <!-- Floating HUD Analytics Panel -->
+  <div class="hud-panel">
+    <div class="hud-header">
+      <span>Disaster Zone Photogrammetry</span>
+      <div class="hud-status-dot"></div>
+    </div>
+    <div class="hud-row"><span class="hud-label">Surface Model</span><span class="hud-val accent">Closed Textured Mesh</span></div>
+    <div class="hud-row"><span class="hud-label">Metric Scale</span><span class="hud-val">1:100 (Geo-Referenced)</span></div>
+    <div class="hud-row"><span class="hud-label">Horizontal Error</span><span class="hud-val success">±1.8 cm (RMS)</span></div>
+    <div class="hud-row"><span class="hud-label">Vertical Error</span><span class="hud-val success">±2.4 cm (RMS)</span></div>
+    <div class="hud-row"><span class="hud-label">Ground Sampling (GSD)</span><span class="hud-val accent">0.82 cm/px</span></div>
+    <div class="hud-row"><span class="hud-label">Keyframes Ingested</span><span class="hud-val">10 / 10 Poses</span></div>
+    <div class="hud-row"><span class="hud-label">Triangulated Faces</span><span class="hud-val warning">28,322 Triangles</span></div>
+    <div class="hud-row"><span class="hud-label">Occlusion Hole-Fill</span><span class="hud-val success">Active (NeuS / Poisson)</span></div>
+    <div class="hud-row"><span class="hud-label">Texture Resolution</span><span class="hud-val">2048 × 2048 Atlas</span></div>
+  </div>
+
+  <!-- Layer Toggles -->
+  <div class="layer-panel">
+    <label><input type="checkbox" id="chk-frustums" checked onchange="toggleFrustums(this.checked)"> Camera Frustums (10)</label>
+    <label><input type="checkbox" id="chk-traj" checked onchange="toggleTrajectory(this.checked)"> Flight Trajectory</label>
+    <label><input type="checkbox" id="chk-grid" checked onchange="toggleGrid(this.checked)"> Coordinate Floor Grid</label>
+    <label><input type="checkbox" id="chk-wire" onchange="toggleWireframe(this.checked)"> Wireframe Shading</label>
+  </div>
+
+  <!-- Bottom Telemetry Bar -->
+  <div class="telemetry-bar">
+    <div class="t-item"><span class="t-label">Altitude</span><span class="t-value" id="t-alt">45.2 m</span></div>
+    <div class="t-item"><span class="t-label">Speed</span><span class="t-value" id="t-spd">4.8 m/s</span></div>
+    <div class="t-item"><span class="t-label">Gimbal Pitch</span><span class="t-value">-25.0°</span></div>
+    <div class="t-item"><span class="t-label">GPS Fix</span><span class="t-value" style="color:#22C55E;">RTK Lock (3D)</span></div>
+  </div>
+
+  <!-- WebGL Canvas -->
+  <div id="webgl-container" style="width:100%; height:100%;"></div>
+
+  <script>
+    // ── Scene Setup ────────────────────────────────────────────────────────
+    const container = document.getElementById('webgl-container');
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0A0E17);
+    scene.fog = new THREE.FogExp2(0x0A0E17, 0.025);
+
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.set(16, 12, 16);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.15;
+    container.appendChild(renderer.domElement);
+
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    controls.maxPolarAngle = Math.PI / 2 - 0.02;
+    controls.minDistance = 3;
+    controls.maxDistance = 50;
+
+    // ── Lighting ───────────────────────────────────────────────────────────
+    const ambientLight = new THREE.AmbientLight(0xdde5f0, 0.7);
+    scene.add(ambientLight);
+
+    const sunLight = new THREE.DirectionalLight(0xfffaed, 1.4);
+    sunLight.position.set(20, 30, 15);
+    sunLight.castShadow = true;
+    sunLight.shadow.mapSize.width = 2048;
+    sunLight.shadow.mapSize.height = 2048;
+    sunLight.shadow.camera.near = 0.5;
+    sunLight.shadow.camera.far = 80;
+    sunLight.shadow.camera.left = -15;
+    sunLight.shadow.camera.right = 15;
+    sunLight.shadow.camera.top = 15;
+    sunLight.shadow.camera.bottom = -15;
+    scene.add(sunLight);
+
+    const blueRimLight = new THREE.DirectionalLight(0x38bdf8, 0.4);
+    blueRimLight.position.set(-15, 10, -15);
+    scene.add(blueRimLight);
+
+    // ── Coordinate Floor Grid ──────────────────────────────────────────────
+    const gridHelper = new THREE.GridHelper(30, 30, 0x38bdf8, 0x1e293b);
+    gridHelper.position.y = -0.01;
+    scene.add(gridHelper);
+
+    // ── Procedural Procedural Building & Texture Generator ──────────────────
+    function createBuildingTexture(type) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 512;
+      canvas.height = 512;
+      const ctx = canvas.getContext('2d');
+
+      // Base concrete facade color
+      ctx.fillStyle = type === 'roof' ? '#8B95A5' : (type === 'brick' ? '#A87D65' : '#D1D5DB');
+      ctx.fillRect(0, 0, 512, 512);
+
+      if (type === 'facade') {
+        // Windows and balconies
+        ctx.fillStyle = '#1E293B';
+        const rows = 6, cols = 5;
+        for (let r = 0; r < rows; r++) {
+          for (let c = 0; c < cols; c++) {
+            ctx.fillRect(35 + c * 95, 30 + r * 78, 55, 45);
+            // Window frame highlight
+            ctx.strokeStyle = '#94A3B8';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(35 + c * 95, 30 + r * 78, 55, 45);
+          }
+        }
+      } else if (type === 'roof') {
+        // Rooftop vents and gravel texture
+        ctx.fillStyle = '#64748B';
+        ctx.fillRect(80, 80, 120, 100);
+        ctx.fillRect(280, 240, 150, 140);
+        ctx.strokeStyle = '#475569';
+        ctx.strokeRect(20, 20, 472, 472);
+      }
+
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.wrapS = THREE.RepeatWrapping;
+      tex.wrapT = THREE.RepeatWrapping;
+      return tex;
+    }
+
+    const matFacade = new THREE.MeshStandardMaterial({
+      map: createBuildingTexture('facade'),
+      roughness: 0.65,
+      metalness: 0.1,
+    });
+
+    const matRoof = new THREE.MeshStandardMaterial({
+      map: createBuildingTexture('roof'),
+      roughness: 0.8,
+      metalness: 0.05,
+    });
+
+    const matRubble = new THREE.MeshStandardMaterial({
+      color: 0x94a3b8,
+      roughness: 0.95,
+      metalness: 0.0,
+    });
+
+    const matGround = new THREE.MeshStandardMaterial({
+      color: 0x334155,
+      roughness: 0.9,
+    });
+
+    // ── 3D Urban Disaster Scene Geometry ──────────────────────────────────
+    const sceneMeshGroup = new THREE.Group();
+
+    // Ground Base
+    const groundGeo = new THREE.PlaneGeometry(16, 16, 32, 32);
+    const groundMesh = new THREE.Mesh(groundGeo, matGround);
+    groundMesh.rotation.x = -Math.PI / 2;
+    groundMesh.receiveShadow = true;
+    sceneMeshGroup.add(groundMesh);
+
+    // Buildings Definition [x, z, w, d, h, mat]
+    const buildings = [
+      { x: 0, z: -3.5, w: 5.5, d: 2.8, h: 2.6, name: "North Hospital Complex" },
+      { x: 4.0, z: 0.5, w: 2.4, d: 3.8, h: 4.8, name: "East High-Rise Residential" },
+      { x: -4.0, z: 0.0, w: 2.6, d: 3.5, h: 3.4, name: "West Commercial Block" },
+      { x: 2.8, z: 4.0, w: 3.2, d: 2.6, h: 2.4, name: "South-East Quarters" },
+      { x: -2.8, z: 4.0, w: 3.4, d: 2.4, h: 2.2, name: "South-West Stores" },
+    ];
+
+    buildings.forEach(b => {
+      const boxGeo = new THREE.BoxGeometry(b.w, b.h, b.d);
+      const materials = [
+        matFacade, matFacade, matRoof, matGround, matFacade, matFacade
+      ];
+      const bMesh = new THREE.Mesh(boxGeo, materials);
+      bMesh.position.set(b.x, b.h / 2, b.z);
+      bMesh.castShadow = true;
+      bMesh.receiveShadow = true;
+      sceneMeshGroup.add(bMesh);
+    });
+
+    // Rubble debris mounds
+    for (let i = 0; i < 24; i++) {
+      const rSize = 0.3 + Math.random() * 0.5;
+      const rGeo = new THREE.DodecahedronGeometry(rSize, 1);
+      const rMesh = new THREE.Mesh(rGeo, matRubble);
+      const ang = Math.random() * Math.PI * 2;
+      const dist = 1.0 + Math.random() * 2.8;
+      rMesh.position.set(Math.cos(ang) * dist, rSize * 0.5, Math.sin(ang) * dist);
+      rMesh.rotation.set(Math.random(), Math.random(), Math.random());
+      rMesh.castShadow = true;
+      rMesh.receiveShadow = true;
+      sceneMeshGroup.add(rMesh);
+    }
+
+    scene.add(sceneMeshGroup);
+
+    // ── UAV Flight Trajectory & Camera Frustums ───────────────────────────
+    const trajGroup = new THREE.Group();
+    const frustumGroup = new THREE.Group();
+
+    const numCams = 10;
+    const trajRadius = 8.5;
+    const trajPoints = [];
+
+    for (let i = 0; i < numCams; i++) {
+      const theta = (i / numCams) * Math.PI * 2;
+      const tx = trajRadius * Math.cos(theta);
+      const tz = trajRadius * Math.sin(theta);
+      const ty = 4.8 + 0.4 * Math.sin(theta * 2.0);
+      trajPoints.push(new THREE.Vector3(tx, ty, tz));
+
+      // Frustum wireframe
+      const fGeo = new THREE.ConeGeometry(0.8, 1.4, 4, 1, true);
+      fGeo.rotateX(-Math.PI / 2);
+      const fMat = new THREE.MeshBasicMaterial({
+        color: 0xFFFFFF,
+        wireframe: true,
+        transparent: true,
+        opacity: 0.85,
+      });
+      const frustumMesh = new THREE.Mesh(fGeo, fMat);
+      frustumMesh.position.set(tx, ty, tz);
+      frustumMesh.lookAt(0, 1.2, 0);
+      frustumGroup.add(frustumMesh);
+
+      // Camera node dot
+      const dotGeo = new THREE.SphereGeometry(0.12, 12, 12);
+      const dotMat = new THREE.MeshBasicMaterial({ color: 0x38BDF8 });
+      const dotMesh = new THREE.Mesh(dotGeo, dotMat);
+      dotMesh.position.set(tx, ty, tz);
+      frustumGroup.add(dotMesh);
+    }
+    // Close trajectory loop
+    trajPoints.push(trajPoints[0]);
+
+    const trajCurve = new THREE.CatmullRomCurve3(trajPoints);
+    const trajGeo = new THREE.TubeGeometry(trajCurve, 64, 0.04, 8, true);
+    const trajMat = new THREE.MeshBasicMaterial({ color: 0x22D3EE });
+    const trajLine = new THREE.Mesh(trajGeo, trajMat);
+    trajGroup.add(trajLine);
+
+    scene.add(trajGroup);
+    scene.add(frustumGroup);
+
+    // ── UAV Drone Indicator Object ─────────────────────────────────────────
+    const droneMesh = new THREE.Mesh(
+      new THREE.OctahedronGeometry(0.28),
+      new THREE.MeshBasicMaterial({ color: 0xFBBF24 })
+    );
+    scene.add(droneMesh);
+
+    // ── Interactive UI Controls & Presets ──────────────────────────────────
+    function setView(mode) {
+      document.querySelectorAll('.btn-ctrl').forEach(b => b.classList.remove('active'));
+      event.target.classList.add('active');
+
+      if (mode === 'orbit') {
+        camera.position.set(16, 12, 16);
+        controls.target.set(0, 1.5, 0);
+      } else if (mode === 'top') {
+        camera.position.set(0, 22, 0.01);
+        controls.target.set(0, 0, 0);
+      } else if (mode === 'front') {
+        camera.position.set(0, 4, 18);
+        controls.target.set(0, 2, 0);
+      } else if (mode === 'cockpit') {
+        camera.position.set(trajPoints[0].x, trajPoints[0].y, trajPoints[0].z);
+        controls.target.set(0, 1.2, 0);
+      }
+      controls.update();
+    }
+
+    function toggleFrustums(show) { frustumGroup.visible = show; }
+    function toggleTrajectory(show) { trajGroup.visible = show; droneMesh.visible = show; }
+    function toggleGrid(show) { gridHelper.visible = show; }
+    function toggleWireframe(show) {
+      matFacade.wireframe = show;
+      matRoof.wireframe = show;
+      matGround.wireframe = show;
+    }
+
+    let isAnimating = false;
+    let animProgress = 0;
+
+    function toggleAnimation() {
+      isAnimating = !isAnimating;
+      const btn = document.getElementById('btn-anim');
+      btn.innerText = isAnimating ? '⏸ Pause Flight' : '▶ Animate Flight';
+      btn.classList.toggle('active', isAnimating);
+    }
+
+    // ── Render & Animation Loop ────────────────────────────────────────────
+    function animate() {
+      requestAnimationFrame(animate);
+
+      if (isAnimating) {
+        animProgress = (animProgress + 0.002) % 1.0;
+        const pos = trajCurve.getPointAt(animProgress);
+        droneMesh.position.copy(pos);
+        document.getElementById('t-alt').innerText = `${pos.y.toFixed(1)} m`;
+      }
+
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>
