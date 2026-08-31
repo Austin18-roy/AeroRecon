@@ -40,3 +40,7 @@ outputs/video_frames/*.png
 outputs/video_depth/*.png
 outputs/video_detections/*.jpg
 outputs/video_reconstruction/*.ply
+outputs/mesh_reconstruction/*.obj
+outputs/mesh_reconstruction/*.mtl
+outputs/mesh_reconstruction/*.png
+outputs/mesh_reconstruction/*.json
