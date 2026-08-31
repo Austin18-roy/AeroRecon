@@ -226,27 +226,42 @@ def load_colmap_cameras(images_bin_path_str: str):
 
 @st.cache_data(show_spinner=False)
 def load_ply_point_cloud(ply_path_str: str):
-    """Cached fast PLY point cloud loader."""
+    """Cached fast PLY point cloud loader with strict validation."""
     p = Path(ply_path_str)
     if not p.exists():
         return None
     try:
-        ply = PlyData.read(p)
+        ply = PlyData.read(str(p))
+        if "vertex" not in ply:
+            return None
         v = ply["vertex"].data
+        if len(v) == 0:
+            return None
         x = np.array(v["x"], dtype=np.float32)
         y = np.array(v["y"], dtype=np.float32)
         z = np.array(v["z"], dtype=np.float32)
+
+        # Filter non-finite points (NaN, Inf)
+        valid = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+        if not np.all(valid):
+            x, y, z = x[valid], y[valid], z[valid]
+            if len(x) == 0:
+                return None
+
         has_rgb = all(c in v.dtype.names for c in ("red", "green", "blue"))
         if has_rgb:
             r = np.array(v["red"], dtype=np.uint8)
             g = np.array(v["green"], dtype=np.uint8)
             b = np.array(v["blue"], dtype=np.uint8)
+            if not np.all(valid):
+                r, g, b = r[valid], g[valid], b[valid]
             colors = [f"rgb({ri},{gi},{bi})" for ri, gi, bi in zip(r, g, b)]
         else:
             colors = "#38bdf8"
         return {"x": x, "y": y, "z": z, "colors": colors, "count": len(x)}
     except Exception:
         return None
+
 
 
 # ============================================================
@@ -722,18 +737,30 @@ if is_custom_mode:
                 omega_score = "N/A"
                 source_tag = "OpenCV / SfM Baseline"
 
+            # Load dynamic reconstruction metadata if present
+            recon_meta_file = VIDEO_RECON_DIR / "reconstruction_meta.json"
+            recon_meta_loaded = {}
+            if recon_meta_file.exists():
+                try:
+                    with open(recon_meta_file, "r", encoding="utf-8") as rmf:
+                        recon_meta_loaded = json.load(rmf)
+                except Exception:
+                    pass
+
+            registered_views_cnt = recon_meta_loaded.get("registered_cameras", len(cust_cams))
+            total_points_cnt = recon_meta_loaded.get("total_points", cust_pts)
+            recon_status_str = "Complete" if registered_views_cnt > 0 else "In Progress"
+
             params = [
-                ("AI Agent",        active_agent),
-                ("Architecture",    agent_arch),
-                ("Dense 3D Points", f"{cust_pts:,}"),
-                ("Ω Confidence",    omega_score),
-                ("Camera Poses",    str(len(cust_cams))),
-                ("Frustums",        str(len(cust_cams))),
+                ("Reconstruction",  recon_status_str),
+                ("AI Engine",       active_agent.split("(")[0].strip()),
+                ("Registered Views",f"{registered_views_cnt} / {n_frames}"),
+                ("Sparse 3D Points",f"{total_points_cnt:,}"),
+                ("Camera Poses",    str(registered_views_cnt)),
                 ("Keyframes",       str(n_frames)),
                 ("Depth Maps",      str(n_depths)),
                 ("Detections",      str(total_dets_cust)),
-                ("Geometry Mesh",   "0.89"),
-                ("Depth Est.",      "0.00 m"),
+                ("Architecture",    agent_arch),
             ]
             for label, value in params:
                 st.markdown(
@@ -772,8 +799,8 @@ if is_custom_mode:
                 f"[OK] Agent: {active_agent}",
                 f"[OK] Keyframes extracted: {n_frames}",
                 f"[OK] Depth Maps (FD): {n_depths}",
-                f"[OK] Camera Trajectory (FC): {len(cust_cams)} poses",
-                f"[OK] 3D Pointmap Fusion: {cust_pts:,} pts",
+                f"[OK] Camera Trajectory (FC): {registered_views_cnt} poses",
+                f"[OK] 3D Pointmap Fusion: {total_points_cnt:,} pts",
                 f"[OK] Ω-Confidence score: {omega_score}",
                 f"[OK] YOLO11s Detections: {total_dets_cust}",
                 "[OK] Grounding Filter: active",
@@ -814,20 +841,24 @@ if is_custom_mode:
                 frustum_scale = st.slider("Frustum Scale", 1, 10, 4, key="map_fscale")
 
             try:
+                map_traces = []
                 cloud_data = load_ply_point_cloud(str(POINT_CLOUD))
                 if cloud_data is not None:
                     px, py, pz = cloud_data["x"], cloud_data["y"], cloud_data["z"]
-                    map_traces = []
 
                     if show_map_pts and len(px):
                         if color_mode == "🌈 Z-Depth Gradient":
-                            z_norm = (pz - pz.min()) / (pz.ptp() + 1e-9)
+                            ptp_z = float(np.ptp(pz)) if len(pz) else 1.0
+                            min_z = float(np.min(pz)) if len(pz) else 0.0
+                            z_norm = (pz - min_z) / (ptp_z + 1e-9) if ptp_z > 1e-9 else np.zeros_like(pz)
                             pt_colors = [
                                 f"rgb({int(30 + 225*v)},{int(180 - 100*v)},{int(240 - 220*v)})"
                                 for v in z_norm.tolist()
                             ]
                         elif color_mode == "⛰️ Elevation Height Tint":
-                            y_norm = (py - py.min()) / (py.ptp() + 1e-9)
+                            ptp_y = float(np.ptp(py)) if len(py) else 1.0
+                            min_y = float(np.min(py)) if len(py) else 0.0
+                            y_norm = (py - min_y) / (ptp_y + 1e-9) if ptp_y > 1e-9 else np.zeros_like(py)
                             pt_colors = [
                                 f"rgb({int(16 + 230*v)},{int(185 - 80*v)},{int(129 + 100*(1-v))})"
                                 for v in y_norm.tolist()
@@ -847,7 +878,6 @@ if is_custom_mode:
                         ))
                 else:
                     px, py, pz = np.array([]), np.array([]), np.array([])
-                    map_traces = []
 
                 y_floor = float(py.min()) - 0.3 if len(py) else 0.0
 
@@ -1559,13 +1589,17 @@ if POINT_CLOUD.exists():
         if cloud_data is not None:
             x, y, z = cloud_data["x"], cloud_data["y"], cloud_data["z"]
             if bm_color_mode == "🌈 Z-Depth Gradient" and len(z):
-                z_norm = (z - z.min()) / (z.ptp() + 1e-9)
+                ptp_z = float(np.ptp(z)) if len(z) else 1.0
+                min_z = float(np.min(z)) if len(z) else 0.0
+                z_norm = (z - min_z) / (ptp_z + 1e-9) if ptp_z > 1e-9 else np.zeros_like(z)
                 pt_colors = [
                     f"rgb({int(30 + 225*v)},{int(180 - 100*v)},{int(240 - 220*v)})"
                     for v in z_norm.tolist()
                 ]
             elif bm_color_mode == "⛰️ Elevation Height Tint" and len(y):
-                y_norm = (y - y.min()) / (y.ptp() + 1e-9)
+                ptp_y = float(np.ptp(y)) if len(y) else 1.0
+                min_y = float(np.min(y)) if len(y) else 0.0
+                y_norm = (y - min_y) / (ptp_y + 1e-9) if ptp_y > 1e-9 else np.zeros_like(y)
                 pt_colors = [
                     f"rgb({int(16 + 230*v)},{int(185 - 80*v)},{int(129 + 100*(1-v))})"
                     for v in y_norm.tolist()
