@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 import struct
+import math
 
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
@@ -585,15 +586,13 @@ if is_custom_mode:
         n_frames        = len(list(IMAGE_DIR.glob("*.png")))
         n_depths        = len(list(DEPTH_DIR.glob("*.png")))
 
-        import math as _math
-
         def _frustum_lines(center, yaw, depth=0.35, fov_h_deg=70.0, aspect=1.78):
-            fov_h = _math.radians(fov_h_deg)
-            hw = depth * _math.tan(fov_h / 2.0)
+            fov_h = math.radians(fov_h_deg)
+            hw = depth * math.tan(fov_h / 2.0)
             hh = hw / aspect
             cx, cy, cz = center
             corners_cam = [(hw, hh, depth), (-hw, hh, depth), (-hw, -hh, depth), (hw, -hh, depth)]
-            cos_y, sin_y = _math.cos(yaw), _math.sin(yaw)
+            cos_y, sin_y = math.cos(yaw), math.sin(yaw)
             def rot(lx, ly, lz):
                 return lx * cos_y + lz * sin_y + cx, ly + cy, -lx * sin_y + lz * cos_y + cz
             world_corners = [rot(*c) for c in corners_cam]
