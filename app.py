@@ -163,8 +163,10 @@ def qvec2rotmat(qvec):
     ])
 
 
-def load_colmap_cameras(images_bin_path):
+@st.cache_data(show_spinner=False)
+def load_colmap_cameras(images_bin_path_str: str):
     """Extracts camera poses and calculates world coordinates C = -R^T * t."""
+    images_bin_path = Path(images_bin_path_str)
     if not images_bin_path.exists():
         return []
     try:
@@ -197,6 +199,31 @@ def load_colmap_cameras(images_bin_path):
         return cameras
     except Exception:
         return []
+
+
+@st.cache_data(show_spinner=False)
+def load_ply_point_cloud(ply_path_str: str):
+    """Cached fast PLY point cloud loader."""
+    p = Path(ply_path_str)
+    if not p.exists():
+        return None
+    try:
+        ply = PlyData.read(p)
+        v = ply["vertex"].data
+        x = np.array(v["x"], dtype=np.float32)
+        y = np.array(v["y"], dtype=np.float32)
+        z = np.array(v["z"], dtype=np.float32)
+        has_rgb = all(c in v.dtype.names for c in ("red", "green", "blue"))
+        if has_rgb:
+            r = np.array(v["red"], dtype=np.uint8)
+            g = np.array(v["green"], dtype=np.uint8)
+            b = np.array(v["blue"], dtype=np.uint8)
+            colors = [f"rgb({ri},{gi},{bi})" for ri, gi, bi in zip(r, g, b)]
+        else:
+            colors = "#38bdf8"
+        return {"x": x, "y": y, "z": z, "colors": colors, "count": len(x)}
+    except Exception:
+        return None
 
 
 # ============================================================
@@ -651,30 +678,28 @@ if is_custom_mode:
                 frustum_scale = st.slider("Frustum Scale", 1, 10, 4, key="map_fscale")
 
             try:
-                ply    = PlyData.read(POINT_CLOUD)
-                vertex = ply["vertex"].data
-                px, py, pz = vertex["x"], vertex["y"], vertex["z"]
-                map_traces = []
+                cloud_data = load_ply_point_cloud(str(POINT_CLOUD))
+                if cloud_data is not None:
+                    px, py, pz = cloud_data["x"], cloud_data["y"], cloud_data["z"]
+                    map_traces = []
 
-                if show_map_pts:
-                    if colorize_depth:
-                        z_norm = (py - py.min()) / (py.ptp() + 1e-9)
-                        pt_colors = [
-                            f"rgb({int(30+225*v)},{int(180-100*v)},{int(240-220*v)})"
-                            for v in z_norm.tolist()
-                        ]
-                    elif all(c in vertex.dtype.names for c in ("red", "green", "blue")):
-                        pt_colors = [
-                            f"rgb({r},{g},{b})"
-                            for r, g, b in zip(vertex["red"], vertex["green"], vertex["blue"])
-                        ]
-                    else:
-                        pt_colors = "#38bdf8"
-                    map_traces.append(go.Scatter3d(
-                        x=px, y=py, z=pz, mode="markers",
-                        marker=dict(size=map_pt_size, color=pt_colors, opacity=0.92),
-                        name="● Dense RGB Point Cloud", hoverinfo="skip",
-                    ))
+                    if show_map_pts:
+                        if colorize_depth:
+                            z_norm = (py - py.min()) / (py.ptp() + 1e-9)
+                            pt_colors = [
+                                f"rgb({int(30+225*v)},{int(180-100*v)},{int(240-220*v)})"
+                                for v in z_norm.tolist()
+                            ]
+                        else:
+                            pt_colors = cloud_data["colors"]
+                        map_traces.append(go.Scatter3d(
+                            x=px, y=py, z=pz, mode="markers",
+                            marker=dict(size=map_pt_size, color=pt_colors, opacity=0.92),
+                            name="● Dense 3D Point Cloud", hoverinfo="skip",
+                        ))
+                else:
+                    px, py, pz = np.array([]), np.array([]), np.array([])
+                    map_traces = []
 
                 y_floor = float(py.min()) - 0.3 if len(py) else 0.0
 
@@ -848,22 +873,13 @@ depth_files = list(DEPTH_DIR.glob("depth_*.png")) if DEPTH_DIR.exists() else []
 if is_custom_mode:
     cameras = st.session_state.custom_cameras
     vertex_count = st.session_state.custom_point_count
-    if not cameras and POINT_CLOUD.exists():
-        # Fallback load points
-        try:
-            ply_temp = PlyData.read(POINT_CLOUD)
-            vertex_count = len(ply_temp["vertex"].data)
-        except Exception:
-            vertex_count = len(images) * 100
+    if not vertex_count and POINT_CLOUD.exists():
+        c_data = load_ply_point_cloud(str(POINT_CLOUD))
+        vertex_count = c_data["count"] if c_data else len(images) * 100
 else:
-    cameras = load_colmap_cameras(BENCHMARK_IMAGES_BIN)
-    vertex_count = 0
-    if POINT_CLOUD.exists():
-        try:
-            ply_temp = PlyData.read(POINT_CLOUD)
-            vertex_count = len(ply_temp["vertex"].data)
-        except Exception:
-            vertex_count = 209
+    cameras = load_colmap_cameras(str(BENCHMARK_IMAGES_BIN))
+    c_data = load_ply_point_cloud(str(POINT_CLOUD))
+    vertex_count = c_data["count"] if c_data else 209
 
 
 # ============================================================
@@ -1195,26 +1211,18 @@ with exp3:
 # Build 3D Plotly figure
 if POINT_CLOUD.exists():
     try:
-        ply = PlyData.read(POINT_CLOUD)
-        vertex = ply["vertex"].data
-
-        x = vertex["x"]
-        y = vertex["y"]
-        z = vertex["z"]
-
-        pt_marker = dict(size=point_size)
-
-        if all(ch in vertex.dtype.names for ch in ("red", "green", "blue")):
-            rgb = [
-                f"rgb({r},{g},{b})"
-                for r, g, b in zip(vertex["red"], vertex["green"], vertex["blue"])
-            ]
-            pt_marker["color"] = rgb
+        cloud_data = load_ply_point_cloud(str(POINT_CLOUD))
+        if cloud_data is not None:
+            x, y, z = cloud_data["x"], cloud_data["y"], cloud_data["z"]
+            pt_colors = cloud_data["colors"]
+        else:
+            x, y, z = np.array([]), np.array([]), np.array([])
+            pt_colors = "#38bdf8"
 
         point_trace = go.Scatter3d(
             x=x, y=y, z=z,
             mode="markers",
-            marker=pt_marker,
+            marker=dict(size=point_size, color=pt_colors),
             name="● 3D Points — reconstructed scene features",
             hoverinfo="skip",
         )
