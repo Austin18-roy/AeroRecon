@@ -19,6 +19,11 @@ from src.video_pipeline import (
     run_depth_on_keyframes,
     estimate_point_cloud_and_trajectory,
 )
+from src.video.extract_frames import (
+    inspect_video,
+    extract_video_frames,
+    compute_blur_score,
+)
 from src.anysplat_pipeline import (
     AnySplatAgent,
     run_anysplat_pipeline,
@@ -31,6 +36,8 @@ from src.nurec_pipeline import (
     NuRecAgent,
     run_nurec_pipeline,
 )
+from src.semantic_3d.spatial_mapping import Semantic3DManager
+from src.rescue_ai.agent import RescueAIAgent
 
 
 # ============================================================
@@ -50,6 +57,13 @@ BENCHMARK_YOLO_DIR = (
 BENCHMARK_SPARSE_DIR = ROOT / "outputs" / "colmap" / "sparse" / "0"
 BENCHMARK_IMAGES_BIN = BENCHMARK_SPARSE_DIR / "images.bin"
 BENCHMARK_POINT_CLOUD = ROOT / "outputs" / "colmap" / "model.ply"
+
+# Safe isolated video workspace paths (never overwrites benchmark data)
+VIDEO_FRAMES_DIR = ROOT / "outputs" / "video_frames"
+VIDEO_DEPTH_DIR = ROOT / "outputs" / "video_depth"
+VIDEO_YOLO_DIR = ROOT / "outputs" / "video_detections"
+VIDEO_RECON_DIR = ROOT / "outputs" / "video_reconstruction"
+VIDEO_POINT_CLOUD = VIDEO_RECON_DIR / "model.ply"
 
 UPLOAD_WORKSPACE_DIR = ROOT / "data" / "input" / "uploaded_session"
 
@@ -278,10 +292,10 @@ if "active_agent_name" not in st.session_state:
 # ============================================================
 
 if data_source == "📹 Upload Custom UAV Video":
-    IMAGE_DIR = UPLOAD_WORKSPACE_DIR / "Images"
-    DEPTH_DIR = UPLOAD_WORKSPACE_DIR / "depth"
-    YOLO_DIR = UPLOAD_WORKSPACE_DIR / "detections"
-    POINT_CLOUD = UPLOAD_WORKSPACE_DIR / "model.ply"
+    IMAGE_DIR = VIDEO_FRAMES_DIR
+    DEPTH_DIR = VIDEO_DEPTH_DIR
+    YOLO_DIR = VIDEO_YOLO_DIR
+    POINT_CLOUD = VIDEO_POINT_CLOUD
     is_custom_mode = True
 else:
     IMAGE_DIR = BENCHMARK_IMAGE_DIR
@@ -341,103 +355,141 @@ if is_custom_mode:
     with st.expander("🎬 **Upload & Process UAV Flight Video**", expanded=not st.session_state.video_processed):
         st.markdown(
             "Upload any aerial UAV footage (`.mp4`, `.mov`, `.avi`, `.mkv`). "
-            "The system automatically extracts keyframes, runs AI analysis, and builds a **dense interactive 3D map**."
+            "OpenCV automatically inspects the video stream, extracts sharp keyframes, runs YOLO11s & Depth Anything V2, "
+            "and reconstructs an **interactive 3D spatial map**."
         )
 
-        u_col1, u_col2 = st.columns([2, 1])
-
-        with u_col1:
-            uploaded_video = st.file_uploader(
-                "Select Drone Flight Video:",
-                type=["mp4", "mov", "avi", "mkv"],
-                help="Upload a video recording from a drone or UAV flight.",
-            )
-
-        with u_col2:
-            keyframe_count = st.slider(
-                "Target Keyframes:",
-                min_value=5,
-                max_value=15,
-                value=10,
-                help="Number of sharpest keyframes extracted across the flight.",
-            )
-            yolo_conf = st.slider(
-                "YOLO Confidence Threshold:",
-                min_value=0.15,
-                max_value=0.70,
-                value=0.30,
-                step=0.05,
-            )
+        uploaded_video = st.file_uploader(
+            "Select Drone Flight Video:",
+            type=["mp4", "mov", "avi", "mkv"],
+            help="Upload a video recording from a drone or UAV flight.",
+        )
 
         if uploaded_video is not None:
             UPLOAD_WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
-            saved_video_path = UPLOAD_WORKSPACE_DIR / "uploaded_drone_video.mp4"
+            saved_video_path = UPLOAD_WORKSPACE_DIR / uploaded_video.name
 
             with open(saved_video_path, "wb") as fv:
                 fv.write(uploaded_video.read())
 
-            v_preview1, v_preview2 = st.columns([1, 1])
-            with v_preview1:
+            try:
+                v_info = inspect_video(saved_video_path)
+                st.markdown("##### 📊 Video Stream Telemetry (OpenCV)")
+                vm1, vm2, vm3, vm4, vm5 = st.columns(5)
+                vm1.metric("Filename", v_info["filename"][:18] + ("…" if len(v_info["filename"]) > 18 else ""))
+                vm2.metric("Duration", v_info["duration_str"])
+                vm3.metric("Frame Rate", f"{v_info['fps']} FPS")
+                vm4.metric("Total Frames", f"{v_info['total_frames']:,}")
+                vm5.metric("Resolution", v_info["resolution_str"])
+            except Exception as ve:
+                st.warning(f"Could not read full video metadata: {ve}")
+                v_info = None
+
+            u_col1, u_col2 = st.columns([1, 1])
+
+            with u_col1:
                 st.video(str(saved_video_path))
                 file_mb = saved_video_path.stat().st_size / (1024 * 1024)
                 st.caption(f"📁 `{uploaded_video.name}` — {file_mb:.1f} MB")
 
-            with v_preview2:
-                st.markdown("#### ⚡ AI Pipeline Stages")
-                st.markdown(
-                    """
-                    <div style='font-size:0.82rem; color:#94a3b8; line-height:2.0;'>
-                    <b style='color:#22c55e;'>Stage 1a</b> &nbsp; Intelligent Keyframe Extraction<br>
-                    <b style='color:#22c55e;'>Stage 1b</b> &nbsp; YOLO11s Object Detection<br>
-                    <b style='color:#22c55e;'>Stage 1c</b> &nbsp; Depth Anything V2 &mdash; Relative Depth<br>
-                    <b style='color:#38bdf8;'>Stage 2 &nbsp;</b> &nbsp; Dense 3D Point Cloud (Depth Unprojection)<br>
-                    <b style='color:#a855f7;'>Stage 3 &nbsp;</b> &nbsp; [Evaluating] AnySplat / VGGT Gaussian Splatting<br>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
+            with u_col2:
+                st.markdown("##### ⚙️ Extraction & AI Parameters")
+                samp_mode = st.radio(
+                    "Sampling Mode:",
+                    ["Target Frame Count", "Every N Frames"],
+                    horizontal=True,
+                    key="samp_mode_radio",
                 )
 
-                if st.button("🚀  Build Interactive 3D Map", type="primary", use_container_width=True):
-                    overall_bar  = st.progress(0.0)
-                    status_text  = st.empty()
+                if samp_mode == "Target Frame Count":
+                    keyframe_count = st.slider(
+                        "Target Frames:",
+                        min_value=5,
+                        max_value=30,
+                        value=10,
+                        help="Number of sharpest keyframes extracted across the flight.",
+                    )
+                    sampling_step = None
+                else:
+                    sampling_step = st.slider(
+                        "Sample Every N Frames:",
+                        min_value=5,
+                        max_value=60,
+                        value=15,
+                        help="Extract 1 frame every N frames.",
+                    )
+                    keyframe_count = 10
+
+                use_keyframe_proto = st.checkbox(
+                    "Keyframe Selection — Prototype (Laplacian Blur & Quality Scoring)",
+                    value=True,
+                    help="Filters out motion-blurred frames to optimize 3D feature matching.",
+                )
+
+                yolo_conf = st.slider(
+                    "YOLO11s Confidence Threshold:",
+                    min_value=0.15,
+                    max_value=0.70,
+                    value=0.30,
+                    step=0.05,
+                )
+
+                if st.button("🚀  Run AI Pipeline & 3D Reconstruction", type="primary", use_container_width=True):
+                    overall_bar = st.progress(0.0)
+                    status_text = st.empty()
 
                     try:
                         # ── Stage 1a: Keyframe Extraction ─────────────────
                         status_text.markdown(
-                            "🔍 **Stage 1a — Keyframe Extraction:** Analysing video sharpness across temporal segments..."
+                            "🔍 **Stage 1a — Frame Extraction:** Sampling video & scoring sharpness across flight segments..."
                         )
-                        keyframes = extract_keyframes(
+                        # Clean old video frames
+                        VIDEO_FRAMES_DIR.mkdir(parents=True, exist_ok=True)
+                        for old_f in VIDEO_FRAMES_DIR.glob("*.png"):
+                            try:
+                                old_f.unlink()
+                            except Exception:
+                                pass
+
+                        keyframes = extract_video_frames(
                             video_path=saved_video_path,
-                            output_dir=IMAGE_DIR,
-                            max_frames=keyframe_count,
+                            output_dir=VIDEO_FRAMES_DIR,
+                            target_frames=keyframe_count,
+                            sampling_step=sampling_step,
+                            use_keyframe_selection=use_keyframe_proto,
                             progress_callback=lambda p, _: overall_bar.progress(p * 0.20),
                         )
-                        st.success(f"✓ Stage 1a complete — {len(keyframes)} keyframes extracted")
+                        if not keyframes:
+                            raise ValueError("No valid frames could be extracted from video.")
+
+                        st.success(f"✓ Stage 1a complete — {len(keyframes)} frames extracted into outputs/video_frames/")
                         img_paths = [kf["path"] for kf in keyframes]
 
                         # ── Stage 1b: YOLO Detection ──────────────────────
                         status_text.markdown(
-                            "🔎 **Stage 1b — YOLO11s Detection:** Identifying vehicles, persons, and objects..."
+                            "🔎 **Stage 1b — YOLO11s Detection:** Identifying aerial vehicles, persons, and infrastructure..."
                         )
+                        VIDEO_YOLO_DIR.mkdir(parents=True, exist_ok=True)
                         det_counts = run_yolo_on_keyframes(
                             image_paths=img_paths,
-                            output_dir=YOLO_DIR,
+                            output_dir=VIDEO_YOLO_DIR,
                             conf=yolo_conf,
                             progress_callback=lambda p, _: overall_bar.progress(0.20 + p * 0.20),
                         )
                         total_dets = sum(det_counts.values())
-                        st.success(f"✓ Stage 1b complete — {total_dets} aerial detections across {len(det_counts)} frames")
+                        st.success(f"✓ Stage 1b complete — {total_dets} detections across {len(det_counts)} frames into outputs/video_detections/")
 
                         # ── Stage 1c: Depth Anything V2 ───────────────────
                         status_text.markdown(
-                            "🧠 **Stage 1c — Depth Anything V2:** Estimating relative surface depth for each frame..."
+                            "🧠 **Stage 1c — Depth Anything V2:** Estimating relative surface depth for extracted frames..."
                         )
+                        VIDEO_DEPTH_DIR.mkdir(parents=True, exist_ok=True)
                         depth_paths = run_depth_on_keyframes(
                             image_paths=img_paths,
-                            output_dir=DEPTH_DIR,
+                            output_dir=VIDEO_DEPTH_DIR,
                             progress_callback=lambda p, _: overall_bar.progress(0.40 + p * 0.25),
                         )
-                        st.success(f"✓ Stage 1c complete — {len(depth_paths)} depth maps generated")
+                        st.success(f"✓ Stage 1c complete — {len(depth_paths)} depth maps saved into outputs/video_depth/")
 
                         # ── Stage 2: 3D Reconstruction (NuRec / VGGT-Ω / VGGT / AnySplat / Baseline) ──
                         if is_nurec_mode:
@@ -1661,8 +1713,8 @@ with r2:
         """
         <div class="roadmap-card" style="border-color:rgba(56,189,248,0.25);">
             <div class="roadmap-stage-label stage-next">⟳ EVALUATING</div>
-            <div class="roadmap-title">Dense 3DGS</div>
-            <div class="roadmap-desc">AnySplat / VGGT — pose-free dense Gaussian Splatting from UAV sequences</div>
+            <div class="roadmap-title">Dense 3DGS & Neural Maps</div>
+            <div class="roadmap-desc">NVIDIA NuRec / AnySplat / VGGT-Ω — dense neural surface & Gaussian Splatting</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1692,11 +1744,69 @@ with r4:
         unsafe_allow_html=True,
     )
 
+# ── Explicit Current vs Future Specifications ──────────────────────────────
+st.markdown("#### 📋 System Specifications & Capability Matrix")
+c_lim1, c_lim2, c_lim3 = st.columns(3)
+
+with c_lim1:
+    st.markdown(
+        """
+        <div class="roadmap-card" style="border-color:rgba(234,179,8,0.3);">
+            <div class="roadmap-stage-label" style="background:rgba(234,179,8,0.15);color:#eab308;">CURRENT PROTOTYPE</div>
+            <div class="roadmap-title" style="color:#f8fafc;font-size:0.9rem;">Offline Sparse Reconstruction</div>
+            <div class="roadmap-desc" style="font-size:0.75rem;color:#cbd5e1;line-height:1.6;">
+                • Offline Structure-from-Motion (COLMAP)<br>
+                • 10 sequential 4K UAV frames<br>
+                • 7 / 10 registered camera viewpoints<br>
+                • 209 triangulated 3D points<br>
+                • YOLO11s aerial detection & Depth Anything V2
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+with c_lim2:
+    st.markdown(
+        """
+        <div class="roadmap-card" style="border-color:rgba(239,68,68,0.3);">
+            <div class="roadmap-stage-label" style="background:rgba(239,68,68,0.15);color:#ef4444;">CURRENT LIMITATIONS</div>
+            <div class="roadmap-title" style="color:#f8fafc;font-size:0.9rem;">Engineering Constraints</div>
+            <div class="roadmap-desc" style="font-size:0.75rem;color:#cbd5e1;line-height:1.6;">
+                • <b>Sparse representation:</b> Skeletal point cloud without solid mesh surfaces.<br>
+                • <b>Unregistered frames:</b> Some frames remain unregistered when feature overlap is low.<br>
+                • <b>Relative depth:</b> Depth Anything V2 outputs scale-relative depth, not metric meters.<br>
+                • <b>Detection noise:</b> Small aerial objects may have occasional missed detections.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+with c_lim3:
+    st.markdown(
+        """
+        <div class="roadmap-card" style="border-color:rgba(168,85,247,0.3);">
+            <div class="roadmap-stage-label" style="background:rgba(168,85,247,0.15);color:#a855f7;">NEXT DEVELOPMENT</div>
+            <div class="roadmap-title" style="color:#f8fafc;font-size:0.9rem;">Planned Capabilities</div>
+            <div class="roadmap-desc" style="font-size:0.75rem;color:#cbd5e1;line-height:1.6;">
+                • Continuous UAV video ingestion & multi-object tracking<br>
+                • Depth + Geometry fusion for dense surface reconstruction<br>
+                • Incremental online 3D mapping with real-time scene updates<br>
+                • Semantic 3D object association & hazard clustering<br>
+                • Rescue AI autonomous flight corridor planning
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 st.caption(
-    "AI reconstruction model reference: "
+    "AI reconstruction models evaluated: "
+    "[NVIDIA NuRec](https://github.com/NVIDIA/nurec-skills) · "
     "[InternRobotics/AnySplat](https://github.com/InternRobotics/AnySplat) · "
-    "Feed-forward 3D Gaussian Splatting from unconstrained views. "
-    "VGGT: Visual Geometry Grounded Transformer for multi-view geometry estimation."
+    "VGGT-Ω Visual Geometry Grounded Transformer. "
+    "Autonomous rescue navigation is conceptual architecture for future phases."
 )
 
 
@@ -1706,24 +1816,25 @@ st.caption(
 
 st.divider()
 
-st.markdown("### 🚀 End-to-End MVD")
+st.markdown("### 🚀 End-to-End MVD Workflow")
 
 st.markdown(
     """
 **UAV Video / Images**
-→ **Intelligent Keyframe Extraction**
-→ **YOLO11s Object Detection**
-→ **Depth Anything V2 — Relative Depth**
+→ **Intelligent Keyframe Extraction (OpenCV)**
+→ **YOLO11s Aerial Object Detection**
+→ **Depth Anything V2 — Relative Surface Depth**
 → **COLMAP Sparse 3D Reconstruction**
 → **Interactive 3D WebGL Visualization**
-→ **[Active AI Agents] VGGT / VGGT-Ω Transformer Pointmaps & AnySplat 3DGS**
+→ **[Evaluated AI Agents] NVIDIA NuRec • VGGT-Ω • AnySplat 3DGS**
 """
 )
 
-st.success("✅ Minimum Viable Demonstrator & AI Agents ready for evaluation.")
+st.success("✅ Minimum Viable Demonstrator & AI Agents ready for competition review.")
 st.info(
     "🔬 **Research Evolution:** Sparse offline reconstruction (COLMAP) → "
     "Dense feed-forward Gaussian Splatting & Transformer Pointmaps (AnySplat & VGGT-Ω) → "
+    "Neural Surface Optimization (NVIDIA NuRec) → "
     "Incremental real-time 3D mapping → Rescue AI spatial reasoning → "
     "Autonomous rescue drone navigation."
 )
