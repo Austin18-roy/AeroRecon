@@ -439,6 +439,12 @@ if is_custom_mode:
                     step=0.05,
                 )
 
+                use_depth_densification = st.checkbox(
+                    "Calibrated Depth Densification (SfM-Aligned)",
+                    value=True,
+                    help="When enabled, robustly fits Depth Anything V2 inverse depth to triangulated 3D geometry. Uncheck for pure sparse SfM points.",
+                )
+
                 if st.button("🚀  Run AI Pipeline & 3D Reconstruction", type="primary", use_container_width=True):
                     overall_bar = st.progress(0.0)
                     status_text = st.empty()
@@ -516,12 +522,13 @@ if is_custom_mode:
                         if is_sfm_mode:
                             status_text.markdown(
                                 "📐 **Stage 3 — OpenCV SfM:** SIFT feature matching → RANSAC Essential Matrix "
-                                "→ Camera pose recovery → Multi-view triangulation → Depth-guided densification..."
+                                "→ Camera pose recovery → Triangulation → Calibrated Inverse Depth Alignment..."
                             )
                             custom_cams, pt_count = run_sfm_reconstruction(
                                 image_paths=img_paths,
                                 depth_dir=VIDEO_DEPTH_DIR,
                                 output_ply_path=POINT_CLOUD,
+                                use_depth_densification=use_depth_densification,
                                 depth_density_per_frame=900,
                                 progress_callback=lambda p, _: overall_bar.progress(0.65 + p * 0.35),
                             )
