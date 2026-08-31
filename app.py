@@ -278,13 +278,12 @@ with hero_col2:
 # ============================================================
 
 if is_custom_mode:
-    st.markdown("### 📹 UAV Video Ingestion & Keyframe Analysis")
-    
-    with st.expander("🎬 **Upload & Ingest UAV Flight Video**", expanded=not st.session_state.video_processed):
+    st.markdown("### 📹 UAV Video Ingestion & AI 3D Mapping Pipeline")
+
+    with st.expander("🎬 **Upload & Process UAV Flight Video**", expanded=not st.session_state.video_processed):
         st.markdown(
-            "Upload any aerial UAV footage (`.mp4`, `.mov`, `.avi`, `.mkv`). The system will automatically "
-            "perform **intelligent keyframe extraction** (selecting sharp, non-blurry frames with temporal coverage) "
-            "and execute **YOLO11s detection**, **Depth Anything V2**, and **3D geometry reconstruction**."
+            "Upload any aerial UAV footage (`.mp4`, `.mov`, `.avi`, `.mkv`). "
+            "The system automatically extracts keyframes, runs AI analysis, and builds a **dense interactive 3D map**."
         )
 
         u_col1, u_col2 = st.columns([2, 1])
@@ -293,7 +292,7 @@ if is_custom_mode:
             uploaded_video = st.file_uploader(
                 "Select Drone Flight Video:",
                 type=["mp4", "mov", "avi", "mkv"],
-                help="Upload a video recording from a drone flight.",
+                help="Upload a video recording from a drone or UAV flight.",
             )
 
         with u_col2:
@@ -302,88 +301,309 @@ if is_custom_mode:
                 min_value=5,
                 max_value=15,
                 value=10,
-                help="Number of sharpest keyframes to extract across the flight trajectory.",
+                help="Number of sharpest keyframes extracted across the flight.",
             )
             yolo_conf = st.slider(
-                "YOLO Confidence:",
+                "YOLO Confidence Threshold:",
                 min_value=0.15,
                 max_value=0.70,
                 value=0.30,
                 step=0.05,
             )
 
-        # Video Preview & Process Action
         if uploaded_video is not None:
             UPLOAD_WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
             saved_video_path = UPLOAD_WORKSPACE_DIR / "uploaded_drone_video.mp4"
 
-            with open(saved_video_path, "wb") as f:
-                f.write(uploaded_video.read())
+            with open(saved_video_path, "wb") as fv:
+                fv.write(uploaded_video.read())
 
             v_preview1, v_preview2 = st.columns([1, 1])
             with v_preview1:
                 st.video(str(saved_video_path))
-                st.caption(f"📁 Source: `{uploaded_video.name}` ({saved_video_path.stat().st_size / (1024*1024):.2f} MB)")
+                file_mb = saved_video_path.stat().st_size / (1024 * 1024)
+                st.caption(f"📁 `{uploaded_video.name}` — {file_mb:.1f} MB")
 
             with v_preview2:
-                st.markdown("#### ⚡ AI Pipeline Execution")
-                st.markdown("Click below to start automated keyframe analysis and downstream processing.")
-                
-                if st.button("🚀 Process Video (Extract Keyframes & Run AI)", type="primary"):
-                    progress_bar = st.progress(0.0)
-                    status_text = st.empty()
+                st.markdown("#### ⚡ AI Pipeline Stages")
+                st.markdown(
+                    """
+                    <div style='font-size:0.82rem; color:#94a3b8; line-height:2.0;'>
+                    <b style='color:#22c55e;'>Stage 1a</b> &nbsp; Intelligent Keyframe Extraction<br>
+                    <b style='color:#22c55e;'>Stage 1b</b> &nbsp; YOLO11s Object Detection<br>
+                    <b style='color:#22c55e;'>Stage 1c</b> &nbsp; Depth Anything V2 &mdash; Relative Depth<br>
+                    <b style='color:#38bdf8;'>Stage 2 &nbsp;</b> &nbsp; Dense 3D Point Cloud (Depth Unprojection)<br>
+                    <b style='color:#a855f7;'>Stage 3 &nbsp;</b> &nbsp; [Evaluating] AnySplat / VGGT Gaussian Splatting<br>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                if st.button("🚀  Build Interactive 3D Map", type="primary", use_container_width=True):
+                    overall_bar  = st.progress(0.0)
+                    status_text  = st.empty()
 
                     try:
-                        # Step 1: Extract Keyframes
-                        status_text.markdown("⏳ **Step 1/4:** Analyzing video and extracting sharpest keyframes...")
+                        # ── Stage 1a: Keyframe Extraction ─────────────────
+                        status_text.markdown(
+                            "🔍 **Stage 1a — Keyframe Extraction:** Analysing video sharpness across temporal segments..."
+                        )
                         keyframes = extract_keyframes(
                             video_path=saved_video_path,
                             output_dir=IMAGE_DIR,
                             max_frames=keyframe_count,
-                            progress_callback=lambda p, msg: progress_bar.progress(p * 0.25),
+                            progress_callback=lambda p, _: overall_bar.progress(p * 0.20),
                         )
-                        st.success(f"✓ Extracted {len(keyframes)} high-clarity keyframes!")
-
-                        # Step 2: YOLO Detection
-                        status_text.markdown("⏳ **Step 2/4:** Running YOLO11s aerial vehicle & object detection...")
+                        st.success(f"✓ Stage 1a complete — {len(keyframes)} keyframes extracted")
                         img_paths = [kf["path"] for kf in keyframes]
+
+                        # ── Stage 1b: YOLO Detection ──────────────────────
+                        status_text.markdown(
+                            "🔎 **Stage 1b — YOLO11s Detection:** Identifying vehicles, persons, and objects..."
+                        )
                         det_counts = run_yolo_on_keyframes(
                             image_paths=img_paths,
                             output_dir=YOLO_DIR,
                             conf=yolo_conf,
-                            progress_callback=lambda p, msg: progress_bar.progress(0.25 + p * 0.25),
+                            progress_callback=lambda p, _: overall_bar.progress(0.20 + p * 0.20),
                         )
-                        st.success(f"✓ Completed YOLO11s detection across all keyframes!")
+                        total_dets = sum(det_counts.values())
+                        st.success(f"✓ Stage 1b complete — {total_dets} aerial detections across {len(det_counts)} frames")
 
-                        # Step 3: Depth Anything V2
-                        status_text.markdown("⏳ **Step 3/4:** Estimating relative depth maps with Depth Anything V2...")
+                        # ── Stage 1c: Depth Anything V2 ───────────────────
+                        status_text.markdown(
+                            "🧠 **Stage 1c — Depth Anything V2:** Estimating relative surface depth for each frame..."
+                        )
                         depth_paths = run_depth_on_keyframes(
                             image_paths=img_paths,
                             output_dir=DEPTH_DIR,
-                            progress_callback=lambda p, msg: progress_bar.progress(0.50 + p * 0.25),
+                            progress_callback=lambda p, _: overall_bar.progress(0.40 + p * 0.25),
                         )
-                        st.success("✓ Generated relative scene depth maps!")
+                        st.success(f"✓ Stage 1c complete — {len(depth_paths)} depth maps generated")
 
-                        # Step 4: 3D Point Cloud & Trajectory
-                        status_text.markdown("⏳ **Step 4/4:** Reconstructing 3D point cloud & camera flight trajectory...")
+                        # ── Stage 2: Dense 3D Point Cloud ─────────────────
+                        status_text.markdown(
+                            "🌐 **Stage 2 — Dense 3D Reconstruction:** Unprojecting depth + RGB into world-space 3D map..."
+                        )
                         custom_cams, pt_count = estimate_point_cloud_and_trajectory(
                             image_paths=img_paths,
                             depth_paths=depth_paths,
                             output_ply_path=POINT_CLOUD,
-                            progress_callback=lambda p, msg: progress_bar.progress(0.75 + p * 0.25),
+                            detection_data=det_counts,
+                            max_points_per_frame=1200,
+                            progress_callback=lambda p, _: overall_bar.progress(0.65 + p * 0.35),
                         )
-                        progress_bar.progress(1.0)
-                        status_text.markdown("🎉 **Pipeline Complete!** All downstream views updated.")
+                        overall_bar.progress(1.0)
+                        status_text.markdown(
+                            f"🎉 **Pipeline Complete!** Dense 3D map built — {pt_count:,} RGB points | {len(custom_cams)} camera poses"
+                        )
 
-                        st.session_state.video_processed = True
-                        st.session_state.custom_cameras = custom_cams
+                        st.session_state.video_processed  = True
+                        st.session_state.custom_cameras   = custom_cams
                         st.session_state.custom_point_count = pt_count
+                        st.session_state.det_counts_custom  = det_counts
                         st.rerun()
 
-                    except Exception as e:
-                        st.error(f"Error processing video: {e}")
+                    except Exception as exc:
+                        st.error(f"Pipeline error: {exc}")
 
     st.divider()
+
+    # ── Post-processing: Dedicated 3D Map section ─────────────────────────────
+    if st.session_state.video_processed and POINT_CLOUD.exists():
+
+        st.markdown("## 🌐 Interactive 3D Scene Map")
+        st.markdown(
+            "Dense, RGB-coloured 3D point cloud built from **Depth Anything V2 depth unprojection** "
+            "and **optical-flow camera pose estimation** from your uploaded UAV video."
+        )
+
+        # Summary metrics
+        det_counts_cust = getattr(st.session_state, "det_counts_custom", {})
+        total_dets_cust = sum(det_counts_cust.values()) if det_counts_cust else 0
+        cust_cams       = st.session_state.custom_cameras
+        cust_pts        = st.session_state.custom_point_count
+
+        mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+        mc1.metric("Dense 3D Points",   f"{cust_pts:,}")
+        mc2.metric("Camera Poses",      f"{len(cust_cams)}")
+        mc3.metric("Detected Objects",  f"{total_dets_cust}")
+        mc4.metric("Depth Maps",        f"{len(list(DEPTH_DIR.glob('*.png')))}")
+        mc5.metric("Stage",             "1-2 Active")
+
+        # 3D viewer controls
+        mp_col1, mp_col2, mp_col3, mp_col4, mp_col5, mp_col6 = st.columns([1.4, 1, 1, 1, 1, 1])
+        with mp_col1:
+            map_view = st.selectbox("View Preset", ["Aerial (Top)", "Perspective", "Front", "Side"], key="map_view")
+        with mp_col2:
+            map_pt_size = st.slider("Point Size", 1, 8, 2, key="map_pt_size")
+        with mp_col3:
+            show_map_cams = st.checkbox("Camera Frustums", value=True, key="map_cams")
+        with mp_col4:
+            show_map_labels = st.checkbox("Frame Labels", value=True, key="map_labels")
+        with mp_col5:
+            show_map_traj = st.checkbox("Flight Path", value=True, key="map_traj")
+        with mp_col6:
+            colorize_depth = st.checkbox("Depth Colorize", value=False, key="map_depth_color",
+                                         help="Colorise by Z-depth instead of RGB texture")
+
+        # Build figure
+        try:
+            ply      = PlyData.read(POINT_CLOUD)
+            vertex   = ply["vertex"].data
+            px, py, pz = vertex["x"], vertex["y"], vertex["z"]
+
+            if colorize_depth:
+                # Z-depth colormap
+                z_norm = (pz - pz.min()) / (pz.ptp() + 1e-9)
+                pt_colors = [
+                    f"rgb({int(255*v)},{int(80 + 120*(1-v))},{int(200*(1-v))})"
+                    for v in z_norm.tolist()
+                ]
+            elif all(c in vertex.dtype.names for c in ("red", "green", "blue")):
+                pt_colors = [
+                    f"rgb({r},{g},{b})"
+                    for r, g, b in zip(vertex["red"], vertex["green"], vertex["blue"])
+                ]
+            else:
+                pt_colors = "#38bdf8"
+
+            map_traces = [go.Scatter3d(
+                x=px, y=py, z=pz,
+                mode="markers",
+                marker=dict(size=map_pt_size, color=pt_colors),
+                name="● Dense 3D Points (RGB scene reconstruction)",
+                hoverinfo="skip",
+            )]
+
+            if cust_cams:
+                cam_cx = [c["center"][0] for c in cust_cams]
+                cam_cy = [c["center"][1] for c in cust_cams]
+                cam_cz = [c["center"][2] for c in cust_cams]
+
+                if show_map_traj:
+                    map_traces.append(go.Scatter3d(
+                        x=cam_cx, y=cam_cy, z=cam_cz,
+                        mode="lines",
+                        line=dict(color="#38bdf8", width=5),
+                        name="━ UAV Flight Path",
+                        hoverinfo="skip",
+                    ))
+
+                if show_map_cams:
+                    cam_mode = "markers+text" if show_map_labels else "markers"
+                    cam_text = [c["name"].replace(".png", "") for c in cust_cams] if show_map_labels else None
+                    map_traces.append(go.Scatter3d(
+                        x=cam_cx, y=cam_cy, z=cam_cz,
+                        mode=cam_mode,
+                        text=cam_text,
+                        textposition="top center",
+                        textfont=dict(size=10, color="#FFFFFF"),
+                        marker=dict(
+                            size=10, symbol="diamond",
+                            color="#38bdf8",
+                            line=dict(color="#FFFFFF", width=1.5),
+                        ),
+                        name="◆ Camera Poses (UAV positions)",
+                        hovertext=[f"📷 {c['name']}" for c in cust_cams],
+                        hoverinfo="text",
+                    ))
+
+            map_fig = go.Figure(data=map_traces)
+
+            map_camera_presets = {
+                "Aerial (Top)": dict(eye=dict(x=0, y=0, z=3.5), up=dict(x=0, y=1, z=0)),
+                "Perspective":  dict(eye=dict(x=1.6, y=1.6, z=1.2)),
+                "Front":        dict(eye=dict(x=0, y=-3.5, z=0.3)),
+                "Side":         dict(eye=dict(x=3.5, y=0, z=0.3)),
+            }
+
+            map_fig.update_layout(
+                height=820,
+                scene=dict(
+                    xaxis_title="X (metres)",
+                    yaxis_title="Y (altitude)",
+                    zaxis_title="Z (metres)",
+                    aspectmode="data",
+                    bgcolor="rgba(5,10,20,1)",
+                    xaxis=dict(
+                        backgroundcolor="rgba(5,10,20,1)",
+                        gridcolor="rgba(56,189,248,0.08)",
+                        showbackground=True,
+                        zerolinecolor="rgba(56,189,248,0.15)",
+                    ),
+                    yaxis=dict(
+                        backgroundcolor="rgba(5,10,20,1)",
+                        gridcolor="rgba(56,189,248,0.08)",
+                        showbackground=True,
+                        zerolinecolor="rgba(56,189,248,0.15)",
+                    ),
+                    zaxis=dict(
+                        backgroundcolor="rgba(5,10,20,1)",
+                        gridcolor="rgba(56,189,248,0.08)",
+                        showbackground=True,
+                        zerolinecolor="rgba(56,189,248,0.15)",
+                    ),
+                ),
+                scene_camera=map_camera_presets.get(map_view, map_camera_presets["Perspective"]),
+                paper_bgcolor="rgba(5,10,20,1)",
+                plot_bgcolor="rgba(5,10,20,1)",
+                margin=dict(l=0, r=0, t=20, b=0),
+                legend=dict(
+                    yanchor="top", y=0.99, xanchor="left", x=0.01,
+                    bgcolor="rgba(5,10,20,0.85)",
+                    font=dict(color="#FFFFFF", size=11),
+                    bordercolor="rgba(56,189,248,0.3)",
+                    borderwidth=1,
+                ),
+            )
+
+            st.plotly_chart(map_fig, width="stretch")
+            st.caption(
+                f"🌐 Dense RGB 3D map — {cust_pts:,} points from {len(cust_cams)} UAV views. "
+                "Rotate: left-drag • Zoom: scroll • Pan: shift+drag."
+            )
+
+        except Exception as e:
+            st.error(f"Could not render 3D map: {e}")
+
+        # Stage status
+        st.markdown("##### Pipeline Stage Status")
+        ss1, ss2, ss3, ss4 = st.columns(4)
+        with ss1:
+            st.markdown(
+                "<div class='roadmap-card'>"
+                "<div class='roadmap-stage-label stage-active'>✓ COMPLETE</div>"
+                "<div class='roadmap-title'>Stage 1 &mdash; MVD</div>"
+                "<div class='roadmap-desc'>COLMAP SfM + Depth Anything V2 + YOLO11s + Dense Point Cloud</div>"
+                "</div>", unsafe_allow_html=True
+            )
+        with ss2:
+            st.markdown(
+                "<div class='roadmap-card' style='border-color:rgba(56,189,248,0.3);'>"
+                "<div class='roadmap-stage-label stage-next'>⟳ EVALUATING</div>"
+                "<div class='roadmap-title'>Stage 2 &mdash; Dense 3DGS</div>"
+                "<div class='roadmap-desc'>AnySplat / VGGT &mdash; photorealistic Gaussian Splatting from UAV sequences</div>"
+                "</div>", unsafe_allow_html=True
+            )
+        with ss3:
+            st.markdown(
+                "<div class='roadmap-card' style='border-color:rgba(168,85,247,0.2);'>"
+                "<div class='roadmap-stage-label stage-future'>◇ NEXT STAGE</div>"
+                "<div class='roadmap-title'>Stage 3 &mdash; Incremental Mapping</div>"
+                "<div class='roadmap-desc'>Online 3D scene updates from live streaming UAV frames</div>"
+                "</div>", unsafe_allow_html=True
+            )
+        with ss4:
+            st.markdown(
+                "<div class='roadmap-card' style='border-color:rgba(168,85,247,0.15);'>"
+                "<div class='roadmap-stage-label stage-future'>◇ FUTURE</div>"
+                "<div class='roadmap-title'>Stage 4 &mdash; Rescue AI</div>"
+                "<div class='roadmap-desc'>Autonomous rescue drone navigation using live 3D scene understanding</div>"
+                "</div>", unsafe_allow_html=True
+            )
+
+        st.divider()
 
 
 # ============================================================
