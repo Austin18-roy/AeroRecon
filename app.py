@@ -38,7 +38,7 @@ from src.nurec_pipeline import (
     run_nurec_pipeline,
 )
 from src.sfm_reconstruction import run_sfm_reconstruction
-from src.semantic_3d.spatial_mapping import Semantic3DManager
+from src.semantic_3d.spatial_mapping import Semantic3DManager, run_semantic_3d_pipeline
 from src.rescue_ai.agent import RescueAIAgent
 
 
@@ -67,8 +67,10 @@ VIDEO_DEPTH_DIR = ROOT / "outputs" / "video_depth"
 VIDEO_YOLO_DIR = ROOT / "outputs" / "video_detections"
 VIDEO_RECON_DIR = ROOT / "outputs" / "video_reconstruction"
 VIDEO_POINT_CLOUD = VIDEO_RECON_DIR / "model.ply"
+VIDEO_SEMANTIC_DIR = ROOT / "outputs" / "video_semantic"
 
 UPLOAD_WORKSPACE_DIR = ROOT / "data" / "input" / "uploaded_session"
+
 
 
 # ============================================================
@@ -597,6 +599,27 @@ if is_custom_mode:
                             )
                             st.session_state.active_agent_name = "Dense Depth Unproject"
 
+                        # ── Stage 4: Semantic 3D Object Mapping ────────────────
+                        status_text.markdown(
+                            "📍 **Stage 4 — Semantic 3D Mapping:** Projecting 2D detections into 3D world space (monocular_sfm)..."
+                        )
+                        VIDEO_SEMANTIC_DIR.mkdir(parents=True, exist_ok=True)
+                        try:
+                            sem_summary = run_semantic_3d_pipeline(
+                                detections_path=VIDEO_YOLO_DIR / "detections.jsonl",
+                                depth_dir=VIDEO_DEPTH_DIR,
+                                recon_meta_path=VIDEO_RECON_DIR / "reconstruction_meta.json",
+                                output_dir=VIDEO_SEMANTIC_DIR,
+                            )
+                            st.session_state.semantic_summary = sem_summary
+                            st.success(
+                                f"✓ Stage 4 complete — {sem_summary['total_fused_objects']} 3D objects localized "
+                                f"({sem_summary['category_counts']['persons']} persons, {sem_summary['category_counts']['vehicles']} vehicles, {sem_summary['category_counts']['animals']} animals) "
+                                f"| outputs/video_semantic/semantic_objects.json"
+                            )
+                        except Exception as sem_err:
+                            st.info(f"Stage 4 notice: {sem_err}")
+
                         overall_bar.progress(1.0)
                         model_name = st.session_state.active_agent_name
                         status_text.markdown(
@@ -899,29 +922,90 @@ if is_custom_mode:
                             hovertext=hover_text, hoverinfo="text",
                         ))
 
-                    # 3D Detection Callout Pins (POI)
+                    # 3D Semantic Object Detection Markers (Stage 4 Grounded)
                     if show_map_pois:
-                        poi_x, poi_y, poi_z, poi_labels = [], [], [], []
-                        for c in cust_cams:
-                            count = det_counts_cust.get(c["name"].replace(".png", ""), 0)
-                            if count > 0:
-                                poi_x.append(c["center"][0])
-                                poi_y.append(c["center"][1] - 0.4)
-                                poi_z.append(c["center"][2] + 0.5)
-                                poi_labels.append(f"📍 {count} Objects ({c['name']})")
+                        sem_markers_file = VIDEO_SEMANTIC_DIR / "semantic_markers.json"
+                        rendered_sem_markers = False
 
-                        if poi_x:
-                            map_traces.append(go.Scatter3d(
-                                x=poi_x, y=poi_y, z=poi_z,
-                                mode="markers+text",
-                                text=poi_labels,
-                                textposition="bottom center",
-                                textfont=dict(size=10, color="#f59e0b"),
-                                marker=dict(size=8, symbol="diamond", color="#f59e0b",
-                                            line=dict(color="#ffffff", width=1.5)),
-                                name="📍 3D Object Detection Pins",
-                                hoverinfo="text",
-                            ))
+                        if sem_markers_file.exists():
+                            try:
+                                with open(sem_markers_file, "r", encoding="utf-8") as mf:
+                                    sem_markers_data = json.load(mf)
+
+                                if sem_markers_data:
+                                    # Group markers by category for distinct traces
+                                    cat_groups = {}
+                                    for mk in sem_markers_data:
+                                        cat = mk.get("category", "other")
+                                        if cat not in cat_groups:
+                                            cat_groups[cat] = []
+                                        cat_groups[cat].append(mk)
+
+                                    cat_config = {
+                                        "person":  {"name": "🚶 3D Persons",  "color": "#22c55e", "symbol": "cross"},
+                                        "vehicle": {"name": "🚗 3D Vehicles", "color": "#38bdf8", "symbol": "diamond"},
+                                        "animal":  {"name": "🐾 3D Animals",  "color": "#f59e0b", "symbol": "circle"},
+                                        "other":   {"name": "📍 3D Objects",  "color": "#a855f7", "symbol": "square"},
+                                    }
+
+                                    for cat, m_list in cat_groups.items():
+                                        cfg = cat_config.get(cat, cat_config["other"])
+                                        mx = [m["world_position"][0] for m in m_list]
+                                        my = [m["world_position"][1] for m in m_list]
+                                        mz = [m["world_position"][2] for m in m_list]
+                                        labels = [m.get("label", "Object") for m in m_list]
+                                        hover = [
+                                            f"🎯 {m.get('label', 'Object')}<br>"
+                                            f"Category: {cat.capitalize()}<br>"
+                                            f"Confidence: {m.get('confidence', 0.0):.2f}<br>"
+                                            f"Observations: {m.get('observation_count', 1)}<br>"
+                                            f"3D Pos: ({m['world_position'][0]:.2f}, {m['world_position'][1]:.2f}, {m['world_position'][2]:.2f})"
+                                            for m in m_list
+                                        ]
+
+                                        map_traces.append(go.Scatter3d(
+                                            x=mx, y=my, z=mz,
+                                            mode="markers+text",
+                                            text=labels,
+                                            textposition="top center",
+                                            textfont=dict(size=10, color="#ffffff"),
+                                            marker=dict(
+                                                size=9,
+                                                symbol=cfg["symbol"],
+                                                color=cfg["color"],
+                                                line=dict(color="#ffffff", width=1.5),
+                                            ),
+                                            name=cfg["name"],
+                                            hovertext=hover,
+                                            hoverinfo="text",
+                                        ))
+                                    rendered_sem_markers = True
+                            except Exception:
+                                rendered_sem_markers = False
+
+                        if not rendered_sem_markers:
+                            # Fallback to camera POI callout pins
+                            poi_x, poi_y, poi_z, poi_labels = [], [], [], []
+                            for c in cust_cams:
+                                count = det_counts_cust.get(c["name"].replace(".png", ""), 0)
+                                if count > 0:
+                                    poi_x.append(c["center"][0])
+                                    poi_y.append(c["center"][1] - 0.4)
+                                    poi_z.append(c["center"][2] + 0.5)
+                                    poi_labels.append(f"📍 {count} Objects ({c['name']})")
+
+                            if poi_x:
+                                map_traces.append(go.Scatter3d(
+                                    x=poi_x, y=poi_y, z=poi_z,
+                                    mode="markers+text",
+                                    text=poi_labels,
+                                    textposition="bottom center",
+                                    textfont=dict(size=10, color="#f59e0b"),
+                                    marker=dict(size=8, symbol="diamond", color="#f59e0b",
+                                                line=dict(color="#ffffff", width=1.5)),
+                                    name="📍 3D Object Detection Pins",
+                                    hoverinfo="text",
+                                ))
 
                 map_cam_presets = {
                     "Aerial / Top-Down (Nadir)": dict(eye=dict(x=0.0, y=3.2, z=0.0), up=dict(x=0, y=0, z=1)),
@@ -962,6 +1046,50 @@ if is_custom_mode:
 
             except Exception as exc_map:
                 st.error(f"Could not render 3D viewer: {exc_map}")
+
+        # ── Stage 4: Semantic 3D Objects Card & Table ─────────────────────────
+        sem_summary_path = VIDEO_SEMANTIC_DIR / "semantic_summary.json"
+        sem_objects_path = VIDEO_SEMANTIC_DIR / "semantic_objects.json"
+
+        if sem_summary_path.exists():
+            try:
+                with open(sem_summary_path, "r", encoding="utf-8") as sf:
+                    sem_summary_data = json.load(sf)
+
+                st.markdown("### 📍 Semantic 3D Objects (Monocular SfM Grounded)")
+                sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+                sc1.metric("Total 3D Objects", sem_summary_data.get("total_fused_objects", 0))
+                sc2.metric("🚶 Persons", sem_summary_data.get("category_counts", {}).get("persons", 0))
+                sc3.metric("🚗 Vehicles", sem_summary_data.get("category_counts", {}).get("vehicles", 0))
+                sc4.metric("🐾 Animals", sem_summary_data.get("category_counts", {}).get("animals", 0))
+                sc5.metric(
+                    "Localized",
+                    f"{sem_summary_data.get('localized_detections', 0)} / {sem_summary_data.get('total_detections', 0)}",
+                )
+
+                if sem_objects_path.exists():
+                    with open(sem_objects_path, "r", encoding="utf-8") as of:
+                        sem_objects_data = json.load(of)
+                    fused_list = sem_objects_data.get("objects", [])
+                    if fused_list:
+                        with st.expander(f"📋 **Localized 3D Semantic Object Directory ({len(fused_list)} objects)**", expanded=False):
+                            obj_rows = []
+                            for ob in fused_list:
+                                pos = ob.get("world_position", [0, 0, 0])
+                                obj_rows.append({
+                                    "Track ID": f"#{ob.get('track_id')}" if ob.get("track_id") is not None else "N/A",
+                                    "Class": ob.get("class_name", "").capitalize(),
+                                    "Category": ob.get("category", "").capitalize(),
+                                    "Confidence": f"{ob.get('confidence', 0.0):.2f}",
+                                    "Observations": ob.get("observation_count", 1),
+                                    "World X": f"{pos[0]:.2f}",
+                                    "World Y": f"{pos[1]:.2f}",
+                                    "World Z": f"{pos[2]:.2f}",
+                                    "Source Frames": ", ".join(ob.get("source_frames", [])),
+                                })
+                            st.dataframe(obj_rows, use_container_width=True)
+            except Exception:
+                pass
 
         # ── Interactive Keyframe & Camera Inspector ───────────────────────────
         if cust_cams:
