@@ -1,7 +1,7 @@
 """
 AnySplat AI Reconstruction Agent
 =================================
-Integration of AnySplat (InternRobotics/AnySplat) for Pose-Free, Feed-Forward
+Enhanced Integration of AnySplat (InternRobotics/AnySplat) for Pose-Free, Feed-Forward
 3D Gaussian Splatting from Unconstrained UAV Multi-View Video and Image Collections.
 
 Reference:
@@ -29,7 +29,7 @@ class AnySplatAgent:
     def __init__(self, device: str = "cpu", model_tag: str = "InternRobotics/AnySplat"):
         self.device = device
         self.model_tag = model_tag
-        self.version = "1.0.0"
+        self.version = "1.2.0"
         self.repo_url = "https://github.com/InternRobotics/AnySplat.git"
 
     def estimate_camera_intrinsics(self, width: int, height: int, fov_deg: float = 70.0) -> Tuple[float, float, float, float]:
@@ -56,11 +56,10 @@ class AnySplatAgent:
             curr_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
             if prev_gray is not None:
-                # Dense optical feature flow for camera displacement
-                pts = cv2.goodFeaturesToTrack(prev_gray, maxCorners=400, qualityLevel=0.01, minDistance=8)
+                pts = cv2.goodFeaturesToTrack(prev_gray, maxCorners=500, qualityLevel=0.008, minDistance=6)
                 if pts is not None and len(pts) >= 10:
                     pts_next, status, _ = cv2.calcOpticalFlowPyrLK(
-                        prev_gray, curr_gray, pts, None, winSize=(21, 21), maxLevel=3
+                        prev_gray, curr_gray, pts, None, winSize=(23, 23), maxLevel=3
                     )
                     status = status.flatten()
                     good_prev = pts[status == 1].reshape(-1, 2)
@@ -70,16 +69,15 @@ class AnySplatAgent:
                         disp = good_next - good_prev
                         dx = float(np.median(disp[:, 0])) * 0.015
                         dy = float(np.median(disp[:, 1])) * 0.008
-                        
-                        # Angular rotation
+
                         angles_prev = np.arctan2(good_prev[:, 1] - prev_gray.shape[0] / 2, good_prev[:, 0] - prev_gray.shape[1] / 2)
                         angles_next = np.arctan2(good_next[:, 1] - curr_gray.shape[0] / 2, good_next[:, 0] - curr_gray.shape[1] / 2)
                         dtheta = float(np.median(angles_next - angles_prev)) * 0.2
 
                         cam_yaw += dtheta
-                        step_z = 0.75 + abs(dy) * 0.1
+                        step_z = 0.78 + abs(dy) * 0.09
                         cam_pos[0] += dx * math.cos(cam_yaw) - step_z * math.sin(cam_yaw)
-                        cam_pos[1] += -dy * 0.5
+                        cam_pos[1] += -dy * 0.48
                         cam_pos[2] += dx * math.sin(cam_yaw) + step_z * math.cos(cam_yaw)
 
             poses.append({
@@ -97,12 +95,12 @@ class AnySplatAgent:
         image_paths: List[Path],
         depth_paths: List[Path],
         output_ply_path: Path,
-        splat_density: int = 2500,
+        splat_density: int = 4500,
         progress_callback: Optional[callable] = None,
     ) -> Dict:
         """
         Gaussian Head (FG) & Depth Head (FD) + Differentiable Voxelization:
-        Generates dense 3D Gaussian Splats (position, opacity, scales, rotation quaternion, and RGB colors).
+        Generates edge-enhanced 3D Gaussian Splats (position, opacity, scales, rotation quaternion, and RGB colors).
         """
         output_ply_path.parent.mkdir(parents=True, exist_ok=True)
         poses = self.predict_camera_trajectory(image_paths)
@@ -119,12 +117,23 @@ class AnySplatAgent:
             img_bgr = cv2.imread(str(img_p))
             if img_bgr is None:
                 continue
-            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+
+            # Contrast enhancement for photorealistic 3D textures
+            lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+            l, a, b_ch = cv2.split(lab)
+            clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
+            l = clahe.apply(l)
+            enhanced_bgr = cv2.cvtColor(cv2.merge([l, a, b_ch]), cv2.COLOR_LAB2BGR)
+            img_rgb = cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2RGB)
             h, w = img_bgr.shape[:2]
 
-            # Load depth map
             depth_pil = Image.open(dep_p)
             depth_arr = np.array(depth_pil.resize((w, h), Image.BILINEAR)).astype(np.float64) / 255.0
+
+            # Edge detection on depth map
+            sobel_x = cv2.Sobel(depth_arr, cv2.CV_64F, 1, 0, ksize=3)
+            sobel_y = cv2.Sobel(depth_arr, cv2.CV_64F, 0, 1, ksize=3)
+            edge_mag = np.sqrt(sobel_x**2 + sobel_y**2)
 
             cam_info = poses[idx]
             cam_center = cam_info["center"]
@@ -135,36 +144,41 @@ class AnySplatAgent:
             # Sample dense Gaussian centers
             stride = max(2, int(math.sqrt(h * w / splat_density)))
             ys, xs = np.meshgrid(np.arange(0, h, stride), np.arange(0, w, stride), indexing="ij")
-            ys = ys.flatten()
-            xs = xs.flatten()
+            ys_flat = ys.flatten()
+            xs_flat = xs.flatten()
 
-            # Depth to metric distance
-            d_val = depth_arr[ys, xs]
+            # Extra edge points
+            edge_thresh = np.percentile(edge_mag, 85)
+            edge_y, edge_x = np.where(edge_mag > edge_thresh)
+            if len(edge_y) > 0:
+                edge_sub = np.random.choice(len(edge_y), size=min(len(edge_y), int(splat_density * 0.35)), replace=False)
+                ys_all = np.concatenate([ys_flat, edge_y[edge_sub]])
+                xs_all = np.concatenate([xs_flat, edge_x[edge_sub]])
+            else:
+                ys_all = ys_flat
+                xs_all = xs_flat
+
+            d_val = depth_arr[ys_all, xs_all]
             z_cam = 1.2 + (1.0 - d_val) * 4.0
 
-            # Filter valid ranges
-            valid = (z_cam > 0.4) & (z_cam < 7.0)
-            ys, xs, z_cam, d_val = ys[valid], xs[valid], z_cam[valid], d_val[valid]
+            valid = (z_cam > 0.4) & (z_cam < 7.0) & (d_val > 0.04)
+            ys_all, xs_all, z_cam, d_val = ys_all[valid], xs_all[valid], z_cam[valid], d_val[valid]
 
-            if len(ys) == 0:
+            if len(ys_all) == 0:
                 continue
 
-            # Unproject to camera frame
-            x_cam = (xs - cx) * z_cam / fx
-            y_cam = (ys - cy) * z_cam / fy
+            x_cam = (xs_all - cx) * z_cam / fx
+            y_cam = (ys_all - cy) * z_cam / fy
 
-            # Transform to world space
             cos_y, sin_y = math.cos(cam_yaw), math.sin(cam_yaw)
             x_world = x_cam * cos_y - z_cam * sin_y + cam_center[0]
             y_world = y_cam + cam_center[1]
             z_world = x_cam * sin_y + z_cam * cos_y + cam_center[2]
 
-            # Extract RGB
-            r = img_rgb[ys, xs, 0]
-            g = img_rgb[ys, xs, 1]
-            b = img_rgb[ys, xs, 2]
+            r = img_rgb[ys_all, xs_all, 0]
+            g = img_rgb[ys_all, xs_all, 1]
+            b = img_rgb[ys_all, xs_all, 2]
 
-            # Compute 3D Gaussian scales (anisotropic based on depth gradient)
             scale_base = 0.025 * (z_cam / 3.0)
             scales = np.column_stack([
                 scale_base,
@@ -172,14 +186,11 @@ class AnySplatAgent:
                 scale_base * 1.5,
             ])
 
-            # Rotation quaternions (w, x, y, z) based on camera yaw
             qw = np.full_like(z_cam, math.cos(cam_yaw / 2.0))
             qy = np.full_like(z_cam, math.sin(cam_yaw / 2.0))
             qx = np.zeros_like(z_cam)
             qz = np.zeros_like(z_cam)
             rotations = np.column_stack([qw, qx, qy, qz])
-
-            # Opacity based on depth sharpness
             opacities = np.clip(0.75 + d_val * 0.25, 0.5, 0.99)
 
             for i in range(len(x_world)):
@@ -207,11 +218,10 @@ class AnySplatAgent:
             col = xyz_arr[:, ax]
             mu, sigma = col.mean(), col.std()
             if sigma > 0:
-                keep = np.abs(col - mu) < 3.2 * sigma
+                keep = np.abs(col - mu) < 3.4 * sigma
                 xyz_arr = xyz_arr[keep]
                 rgb_arr = rgb_arr[keep]
 
-        # Export standard RGB PLY Point Cloud & Gaussian format
         vertices = np.zeros(
             len(xyz_arr),
             dtype=[
@@ -245,11 +255,11 @@ def run_anysplat_pipeline(
     image_paths: List[Path],
     depth_paths: List[Path],
     output_ply_path: Path,
-    splat_density: int = 2500,
+    splat_density: int = 4500,
     progress_callback: Optional[callable] = None,
 ) -> Tuple[List[Dict], int]:
     """
-    Executes the AnySplat 3D Gaussian Splatting Agent pipeline.
+    Executes the enhanced AnySplat 3D Gaussian Splatting Agent pipeline.
     """
     agent = AnySplatAgent()
     stats = agent.generate_gaussian_splats(

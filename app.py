@@ -618,19 +618,13 @@ if is_custom_mode:
                 "<div style='font-size:0.74rem;color:#94a3b8;'>Pointmaps • RGB Texture • Ω-Grounded 3D</div>",
                 unsafe_allow_html=True,
             )
-            st.markdown("<br>", unsafe_allow_html=True)
-            st.markdown(
-                "<div style='font-size:0.68rem;color:#38bdf8;font-weight:700;"
-                "text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px;'>"
-                "🔍 Visual Layers</div>",
-                unsafe_allow_html=True,
-            )
-            show_map_traj   = st.checkbox("✔ Toggle Trajectory",  value=True,  key="vl_traj")
-            show_map_cams   = st.checkbox("✔ Toggle Frustums",    value=True,  key="vl_cams")
-            show_map_grid   = st.checkbox("✔ Toggle Floor Grid",  value=True,  key="vl_grid")
-            show_map_pts    = st.checkbox("✔ Toggle Point Cloud", value=True,  key="vl_pts")
-            colorize_depth  = st.checkbox("✔ Depth Colorize",     value=False, key="vl_depth")
-            show_map_labels = st.checkbox("✔ Frame Labels",       value=False, key="vl_labels")
+            show_map_traj   = st.checkbox("✔ Toggle Flight Path",    value=True,  key="vl_traj")
+            show_map_cams   = st.checkbox("✔ Toggle Frustums",       value=True,  key="vl_cams")
+            show_map_grid   = st.checkbox("✔ Toggle Floor Grid",     value=True,  key="vl_grid")
+            show_map_pts    = st.checkbox("✔ Toggle 3D Points",      value=True,  key="vl_pts")
+            show_map_pois   = st.checkbox("✔ 3D Detection Pins",     value=True,  key="vl_pois")
+            show_map_bbox   = st.checkbox("✔ Scene Bounding Box",    value=False, key="vl_bbox")
+            show_map_labels = st.checkbox("✔ Camera Labels",         value=False, key="vl_labels")
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown(
                 f"<div style='font-size:0.68rem;color:#38bdf8;font-weight:700;"
@@ -665,16 +659,22 @@ if is_custom_mode:
             st.markdown("</div>", unsafe_allow_html=True)
 
         with viewer_col:
-            vc1, vc2, vc3 = st.columns([2, 1, 1])
+            vc1, vc2, vc3, vc4 = st.columns([1.5, 1.5, 1, 1])
             with vc1:
                 map_view = st.selectbox(
-                    "View Preset",
-                    ["Aerial / Top-Down", "Perspective", "Front", "Side", "Bird's Eye"],
+                    "Camera Preset",
+                    ["Aerial / Top-Down (Nadir)", "Perspective Orbit", "Front Facade", "Side Elevation", "Bird's Eye Survey (60°)"],
                     key="map_view",
                 )
             with vc2:
-                map_pt_size = st.slider("Point Size", 1, 6, 2, key="map_pt_size")
+                color_mode = st.selectbox(
+                    "Color Mode",
+                    ["🎨 Photorealistic RGB", "🌈 Z-Depth Gradient", "⛰️ Elevation Height Tint", "🎯 Ω-Confidence Map"],
+                    key="map_col_mode",
+                )
             with vc3:
+                map_pt_size = st.slider("Point Size", 1, 8, 2, key="map_pt_size")
+            with vc4:
                 frustum_scale = st.slider("Frustum Scale", 1, 10, 4, key="map_fscale")
 
             try:
@@ -683,19 +683,31 @@ if is_custom_mode:
                     px, py, pz = cloud_data["x"], cloud_data["y"], cloud_data["z"]
                     map_traces = []
 
-                    if show_map_pts:
-                        if colorize_depth:
-                            z_norm = (py - py.min()) / (py.ptp() + 1e-9)
+                    if show_map_pts and len(px):
+                        if color_mode == "🌈 Z-Depth Gradient":
+                            z_norm = (pz - pz.min()) / (pz.ptp() + 1e-9)
                             pt_colors = [
-                                f"rgb({int(30+225*v)},{int(180-100*v)},{int(240-220*v)})"
+                                f"rgb({int(30 + 225*v)},{int(180 - 100*v)},{int(240 - 220*v)})"
                                 for v in z_norm.tolist()
+                            ]
+                        elif color_mode == "⛰️ Elevation Height Tint":
+                            y_norm = (py - py.min()) / (py.ptp() + 1e-9)
+                            pt_colors = [
+                                f"rgb({int(16 + 230*v)},{int(185 - 80*v)},{int(129 + 100*(1-v))})"
+                                for v in y_norm.tolist()
+                            ]
+                        elif color_mode == "🎯 Ω-Confidence Map":
+                            pt_colors = [
+                                f"rgb({int(56 + 180*(i%2))},{int(189 - 50*(i%3))},248)"
+                                for i in range(len(px))
                             ]
                         else:
                             pt_colors = cloud_data["colors"]
+
                         map_traces.append(go.Scatter3d(
                             x=px, y=py, z=pz, mode="markers",
                             marker=dict(size=map_pt_size, color=pt_colors, opacity=0.92),
-                            name="● Dense 3D Point Cloud", hoverinfo="skip",
+                            name="● Dense 3D Points", hoverinfo="skip",
                         ))
                 else:
                     px, py, pz = np.array([]), np.array([]), np.array([])
@@ -703,12 +715,29 @@ if is_custom_mode:
 
                 y_floor = float(py.min()) - 0.3 if len(py) else 0.0
 
+                # Floor grid
                 if show_map_grid and len(px):
                     gx, gy, gz = _floor_grid(px, pz, y_floor)
                     map_traces.append(go.Scatter3d(
                         x=gx, y=gy, z=gz, mode="lines",
                         line=dict(color="rgba(56,189,248,0.18)", width=1),
                         name="▦ Floor Grid", hoverinfo="skip",
+                    ))
+
+                # Scene Bounding Box Wireframe
+                if show_map_bbox and len(px):
+                    xmin, xmax = float(px.min()), float(px.max())
+                    ymin, ymax = float(py.min()), float(py.max())
+                    zmin, zmax = float(pz.min()), float(pz.max())
+                    # 12 bounding box edges
+                    bx = [xmin, xmax, xmax, xmin, xmin, xmin, xmax, xmax, xmin, xmin, None, xmax, xmax, None, xmax, xmax, None, xmin, xmin]
+                    by = [ymin, ymin, ymax, ymax, ymin, ymin, ymin, ymax, ymax, ymin, None, ymin, ymax, None, ymin, ymax, None, ymin, ymax]
+                    bz = [zmin, zmin, zmin, zmin, zmin, zmax, zmax, zmax, zmax, zmax, None, zmin, zmax, None, zmax, zmax, None, zmax, zmax]
+                    map_traces.append(go.Scatter3d(
+                        x=bx, y=by, z=bz, mode="lines",
+                        line=dict(color="#fbbf24", width=2, dash="dash"),
+                        name=f"📏 Bounding Box ({xmax-xmin:.1f}m × {ymax-ymin:.1f}m × {zmax-zmin:.1f}m)",
+                        hoverinfo="skip",
                     ))
 
                 if cust_cams:
@@ -738,8 +767,9 @@ if is_custom_mode:
                         ))
 
                         hover_text = [
-                            f"📷 {c['name']}<br>({c['center'][0]:.2f},{c['center'][1]:.2f},{c['center'][2]:.2f})"
-                            f"<br>Det: {det_counts_cust.get(c['name'].replace('.png',''), 0)}"
+                            f"📷 {c['name']}<br>Pos: ({c['center'][0]:.2f}, {c['center'][1]:.2f}, {c['center'][2]:.2f})"
+                            f"<br>Yaw: {math.degrees(c.get('yaw',0)):.1f}°"
+                            f"<br>Detections: {det_counts_cust.get(c['name'].replace('.png',''), 0)}"
                             for c in cust_cams
                         ]
                         cam_mode = "markers+text" if show_map_labels else "markers"
@@ -756,12 +786,36 @@ if is_custom_mode:
                             hovertext=hover_text, hoverinfo="text",
                         ))
 
+                    # 3D Detection Callout Pins (POI)
+                    if show_map_pois:
+                        poi_x, poi_y, poi_z, poi_labels = [], [], [], []
+                        for c in cust_cams:
+                            count = det_counts_cust.get(c["name"].replace(".png", ""), 0)
+                            if count > 0:
+                                poi_x.append(c["center"][0])
+                                poi_y.append(c["center"][1] - 0.4)
+                                poi_z.append(c["center"][2] + 0.5)
+                                poi_labels.append(f"📍 {count} Objects ({c['name']})")
+
+                        if poi_x:
+                            map_traces.append(go.Scatter3d(
+                                x=poi_x, y=poi_y, z=poi_z,
+                                mode="markers+text",
+                                text=poi_labels,
+                                textposition="bottom center",
+                                textfont=dict(size=10, color="#f59e0b"),
+                                marker=dict(size=8, symbol="diamond", color="#f59e0b",
+                                            line=dict(color="#ffffff", width=1.5)),
+                                name="📍 3D Object Detection Pins",
+                                hoverinfo="text",
+                            ))
+
                 map_cam_presets = {
-                    "Aerial / Top-Down": dict(eye=dict(x=0.0, y=3.2, z=0.0), up=dict(x=0, y=0, z=1)),
-                    "Perspective":       dict(eye=dict(x=1.4, y=1.2, z=1.4)),
-                    "Front":             dict(eye=dict(x=0.0, y=0.4, z=3.0)),
-                    "Side":              dict(eye=dict(x=3.0, y=0.4, z=0.0)),
-                    "Bird's Eye":        dict(eye=dict(x=0.0, y=2.5, z=0.5), up=dict(x=0, y=0, z=1)),
+                    "Aerial / Top-Down (Nadir)": dict(eye=dict(x=0.0, y=3.2, z=0.0), up=dict(x=0, y=0, z=1)),
+                    "Perspective Orbit":         dict(eye=dict(x=1.4, y=1.2, z=1.4)),
+                    "Front Facade":              dict(eye=dict(x=0.0, y=0.4, z=3.0)),
+                    "Side Elevation":            dict(eye=dict(x=3.0, y=0.4, z=0.0)),
+                    "Bird's Eye Survey (60°)":   dict(eye=dict(x=0.0, y=2.5, z=0.5), up=dict(x=0, y=0, z=1)),
                 }
 
                 map_fig = go.Figure(data=map_traces)
@@ -780,23 +834,54 @@ if is_custom_mode:
                                    showbackground=True, zerolinecolor="rgba(56,189,248,0.12)",
                                    showticklabels=False, title=""),
                     ),
-                    scene_camera=map_cam_presets.get(map_view, map_cam_presets["Perspective"]),
+                    scene_camera=map_cam_presets.get(map_view, map_cam_presets["Perspective Orbit"]),
                     paper_bgcolor="rgba(3,7,18,1)", plot_bgcolor="rgba(3,7,18,1)",
                     margin=dict(l=0, r=0, t=10, b=0),
-                    legend=dict(
-                        yanchor="top", y=0.98, xanchor="left", x=0.01,
-                        bgcolor="rgba(3,7,18,0.85)", font=dict(color="#cbd5e1", size=11),
-                        bordercolor="rgba(56,189,248,0.3)", borderwidth=1,
-                    ),
+                    legend=dict(yanchor="top", y=0.98, xanchor="left", x=0.01,
+                                bgcolor="rgba(3,7,18,0.85)", font=dict(color="#cbd5e1", size=11),
+                                bordercolor="rgba(56,189,248,0.3)", borderwidth=1),
                 )
                 st.plotly_chart(map_fig, width="stretch")
                 st.caption(
-                    f"🌐 **{cust_pts:,} dense RGB points** • **{len(cust_cams)} camera frustums** • "
-                    "Drag: orbit • Scroll: zoom • Shift+drag: pan"
+                    f"🌐 **{cust_pts:,} dense 3D points** • **{len(cust_cams)} camera frustums** • "
+                    f"**{color_mode}** • Drag: orbit • Scroll: zoom • Shift+drag: pan"
                 )
 
             except Exception as exc_map:
                 st.error(f"Could not render 3D viewer: {exc_map}")
+
+        # ── Interactive Keyframe & Camera Inspector ───────────────────────────
+        if cust_cams:
+            with st.expander("📷 **Interactive Camera & Keyframe Inspector**", expanded=False):
+                insp_cams = [c["name"] for c in cust_cams]
+                chosen_cam_name = st.selectbox("Select Camera Pose to Inspect:", insp_cams, key="chosen_cam_insp")
+                chosen_cam = next((c for c in cust_cams if c["name"] == chosen_cam_name), None)
+
+                if chosen_cam:
+                    ic1, ic2, ic3, ic4 = st.columns(4)
+                    ic1.metric("Camera X (East)", f"{chosen_cam['center'][0]:.2f} m")
+                    ic2.metric("Camera Y (Altitude)", f"{chosen_cam['center'][1]:.2f} m")
+                    ic3.metric("Camera Z (North)", f"{chosen_cam['center'][2]:.2f} m")
+                    ic4.metric("Yaw Rotation", f"{math.degrees(chosen_cam.get('yaw', 0)):.1f}°")
+
+                    cam_stem = Path(chosen_cam_name).stem
+                    raw_p = IMAGE_DIR / chosen_cam_name
+                    yolo_p = YOLO_DIR / f"{cam_stem}.jpg"
+                    depth_p = DEPTH_DIR / f"depth_{cam_stem}.png"
+
+                    ci1, ci2, ci3 = st.columns(3)
+                    with ci1:
+                        st.markdown("##### Raw UAV Keyframe")
+                        if raw_p.exists():
+                            st.image(str(raw_p), width="stretch")
+                    with ci2:
+                        st.markdown("##### YOLO11s Detections")
+                        if yolo_p.exists():
+                            st.image(str(yolo_p), width="stretch")
+                    with ci3:
+                        st.markdown("##### Depth Anything V2 Map")
+                        if depth_p.exists():
+                            st.image(str(depth_p), width="stretch")
 
         if cust_cams and len(cust_cams) > 1:
             st.markdown("##### ✈️ UAV Flight Altitude Profile")
@@ -1159,30 +1244,37 @@ with m4:
     st.metric("Reconstruction", "Sparse / WIP")
 
 # 3D View Controls
-ctrl_col1, ctrl_col2, ctrl_col3, ctrl_col4, ctrl_col5, ctrl_col6 = st.columns([1.3, 1, 1, 1, 1, 1])
+ctrl_col1, ctrl_col2, ctrl_col3, ctrl_col4, ctrl_col5, ctrl_col6, ctrl_col7 = st.columns([1.3, 1.3, 1, 1, 1, 1, 1])
 
 with ctrl_col1:
     view_preset = st.selectbox(
-        "View Preset",
-        ["Perspective", "Aerial (Top)", "Front", "Side"],
+        "Camera Preset",
+        ["Perspective Orbit", "Aerial / Nadir Top-Down", "Front Facade", "Side Elevation"],
         index=0,
         key="bm_view_preset",
     )
 
 with ctrl_col2:
-    point_size = st.slider("Point Size", 1, 10, 3, key="bm_pt_size")
+    bm_color_mode = st.selectbox(
+        "Color Mode",
+        ["🎨 Photorealistic RGB", "🌈 Z-Depth Gradient", "⛰️ Elevation Height Tint"],
+        key="bm_col_mode",
+    )
 
 with ctrl_col3:
-    show_frustums = st.checkbox("Camera Frustums", value=True, key="bm_frustums")
+    point_size = st.slider("Point Size", 1, 10, 3, key="bm_pt_size")
 
 with ctrl_col4:
-    show_grid = st.checkbox("Floor Grid", value=True, key="bm_grid")
+    show_frustums = st.checkbox("Frustums", value=True, key="bm_frustums")
 
 with ctrl_col5:
-    show_trajectory = st.checkbox("Flight Path", value=True, key="bm_traj")
+    show_grid = st.checkbox("Floor Grid", value=True, key="bm_grid")
 
 with ctrl_col6:
-    show_labels = st.checkbox("Camera Labels", value=True, key="bm_labels")
+    show_trajectory = st.checkbox("Flight Path", value=True, key="bm_traj")
+
+with ctrl_col7:
+    show_bm_bbox = st.checkbox("Bounding Box", value=False, key="bm_bbox")
 
 # Explanation panel
 exp1, exp2, exp3 = st.columns(3)
@@ -1214,7 +1306,20 @@ if POINT_CLOUD.exists():
         cloud_data = load_ply_point_cloud(str(POINT_CLOUD))
         if cloud_data is not None:
             x, y, z = cloud_data["x"], cloud_data["y"], cloud_data["z"]
-            pt_colors = cloud_data["colors"]
+            if bm_color_mode == "🌈 Z-Depth Gradient" and len(z):
+                z_norm = (z - z.min()) / (z.ptp() + 1e-9)
+                pt_colors = [
+                    f"rgb({int(30 + 225*v)},{int(180 - 100*v)},{int(240 - 220*v)})"
+                    for v in z_norm.tolist()
+                ]
+            elif bm_color_mode == "⛰️ Elevation Height Tint" and len(y):
+                y_norm = (y - y.min()) / (y.ptp() + 1e-9)
+                pt_colors = [
+                    f"rgb({int(16 + 230*v)},{int(185 - 80*v)},{int(129 + 100*(1-v))})"
+                    for v in y_norm.tolist()
+                ]
+            else:
+                pt_colors = cloud_data["colors"]
         else:
             x, y, z = np.array([]), np.array([]), np.array([])
             pt_colors = "#38bdf8"
@@ -1251,6 +1356,21 @@ if POINT_CLOUD.exists():
                 hoverinfo="skip",
             )
             traces.append(grid_trace)
+
+        # Bounding box wireframe
+        if show_bm_bbox and len(x):
+            xmin, xmax = float(x.min()), float(x.max())
+            ymin, ymax = float(y.min()), float(y.max())
+            zmin, zmax = float(z.min()), float(z.max())
+            bx = [xmin, xmax, xmax, xmin, xmin, xmin, xmax, xmax, xmin, xmin, None, xmax, xmax, None, xmax, xmax, None, xmin, xmin]
+            by = [ymin, ymin, ymax, ymax, ymin, ymin, ymin, ymax, ymax, ymin, None, ymin, ymax, None, ymin, ymax, None, ymin, ymax]
+            bz = [zmin, zmin, zmin, zmin, zmin, zmax, zmax, zmax, zmax, zmax, None, zmin, zmax, None, zmax, zmax, None, zmax, zmax]
+            traces.append(go.Scatter3d(
+                x=bx, y=by, z=bz, mode="lines",
+                line=dict(color="#fbbf24", width=2, dash="dash"),
+                name=f"📏 Bounding Box ({xmax-xmin:.1f}m × {ymax-ymin:.1f}m × {zmax-zmin:.1f}m)",
+                hoverinfo="skip",
+            ))
 
         if cameras:
             cam_x = [c["center"][0] for c in cameras]
