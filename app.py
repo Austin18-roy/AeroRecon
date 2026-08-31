@@ -311,13 +311,14 @@ def _frustum_lines(center, yaw, depth=0.35, fov_h_deg=70.0, aspect=1.78):
     return segs_x, segs_y, segs_z
 
 
-def _floor_grid(px, pz, y_floor, n_divs=14):
-    """Constructs a responsive floor reference grid."""
-    xmin, xmax = float(np.min(px)), float(np.max(px))
-    zmin, zmax = float(np.min(pz)), float(np.max(pz))
-    pad = max(xmax - xmin, zmax - zmin) * 0.12
-    x0, x1 = xmin - pad, xmax + pad
-    z0, z1 = zmin - pad, zmax + pad
+def _floor_grid(px, pz, y_floor, n_divs=12):
+    """Constructs a subtle, tightly scaled floor reference grid."""
+    p2_x, p98_x = float(np.percentile(px, 2)), float(np.percentile(px, 98))
+    p2_z, p98_z = float(np.percentile(pz, 2)), float(np.percentile(pz, 98))
+    pad_x = max((p98_x - p2_x) * 0.05, 0.5)
+    pad_z = max((p98_z - p2_z) * 0.05, 0.5)
+    x0, x1 = p2_x - pad_x, p98_x + pad_x
+    z0, z1 = p2_z - pad_z, p98_z + pad_z
     gx, gy, gz = [], [], []
     for xi in [x0 + i * (x1 - x0) / n_divs for i in range(n_divs + 1)]:
         gx += [xi, xi, None]; gy += [y_floor, y_floor, None]; gz += [z0, z1, None]
@@ -710,14 +711,20 @@ tab_3d, tab_inspect, tab_semantic, tab_tech = st.tabs([
 # ============================================================
 
 with tab_3d:
-    ctrl_col, viewer_col = st.columns([1, 3.2])
+    ctrl_col, viewer_col = st.columns([1, 3.6])
 
     with ctrl_col:
-        st.markdown("##### 🎛️ Viewer Settings")
+        st.markdown("##### 🎛️ View Controls")
         map_view = st.selectbox(
             "Camera Preset:",
-            ["Aerial / Top-Down (Nadir)", "Perspective Orbit", "Front Facade", "Side Elevation", "Bird's Eye Survey (60°)"],
-            index=1,
+            [
+                "Aerial / Isometric (45° Survey)",
+                "Aerial Top-Down (Nadir)",
+                "Perspective Orbit",
+                "Front Elevation",
+                "Side Elevation",
+            ],
+            index=0,
             key="tab1_view_preset",
         )
         color_mode = st.selectbox(
@@ -726,32 +733,55 @@ with tab_3d:
             index=0,
             key="tab1_color_mode",
         )
-        map_pt_size = st.slider("Point Size", 1, 8, 2, key="tab1_pt_size")
-        frustum_scale = st.slider("Frustum Scale", 1, 10, 4, key="tab1_fscale")
+
+        default_pt_size = 2 if vertex_count > 20000 else 3
+        map_pt_size = st.slider("Point Size", 1, 8, default_pt_size, key="tab1_pt_size")
+        frustum_scale = st.slider("Frustum Scale", 1, 10, 3, key="tab1_fscale")
 
         st.markdown("<div style='height:6px;'></div>", unsafe_allow_html=True)
         st.markdown("##### 👁️ Visual Layers")
-        show_map_traj   = st.checkbox("✔ Flight Trajectory Path", value=True,  key="tab1_vl_traj")
-        show_map_cams   = st.checkbox("✔ Camera Frustums",       value=True,  key="tab1_vl_cams")
-        show_map_grid   = st.checkbox("✔ Floor Reference Grid",  value=True,  key="tab1_vl_grid")
-        show_map_pts    = st.checkbox("✔ Reconstructed 3D Points", value=True, key="tab1_vl_pts")
-        show_map_pois   = st.checkbox("✔ 3D Semantic Detection Pins", value=True, key="tab1_vl_pois")
-        show_map_bbox   = st.checkbox("✔ Scene Bounding Box",    value=False, key="tab1_vl_bbox")
-        show_map_labels = st.checkbox("✔ Camera Pose Labels",    value=False, key="tab1_vl_labels")
+        show_map_pts    = st.checkbox("✔ 3D Reconstructed Points", value=True,  key="tab1_vl_pts")
+        show_map_pois   = st.checkbox("✔ 3D Semantic Markers",    value=True,  key="tab1_vl_pois")
+        show_map_grid   = st.checkbox("✔ Floor Reference Grid",   value=True,  key="tab1_vl_grid")
+        show_map_traj   = st.checkbox("Flight Trajectory Path",   value=False, key="tab1_vl_traj")
+        show_map_cams   = st.checkbox("Camera Frustums",          value=False, key="tab1_vl_cams")
+        show_sem_labels = st.checkbox("Show Marker Text Labels",  value=False, key="tab1_vl_semlbl")
+        show_map_labels = st.checkbox("Camera Pose Labels",       value=False, key="tab1_vl_labels")
+        show_map_bbox   = st.checkbox("Scene Bounding Box",       value=False, key="tab1_vl_bbox")
 
         st.markdown(
             """
-            <div style="font-size:0.75rem;color:#94a3b8;line-height:1.6;margin-top:14px;background:rgba(15,23,42,0.6);padding:10px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.06);">
-                <b>🖱️ Navigation Controls:</b><br>
-                • <b>Left-Click + Drag:</b> Orbit & rotate<br>
-                • <b>Mouse Wheel:</b> Zoom in / out<br>
-                • <b>Shift + Drag:</b> Pan spatial scene
+            <div style="font-size:0.74rem;color:#94a3b8;line-height:1.6;margin-top:14px;background:rgba(15,23,42,0.6);padding:10px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.06);">
+                <b>🖱️ Navigation:</b><br>
+                • <b>Left-Drag:</b> Rotate & Orbit<br>
+                • <b>Wheel:</b> Zoom In/Out<br>
+                • <b>Shift-Drag:</b> Pan Viewport
             </div>
             """,
             unsafe_allow_html=True,
         )
 
     with viewer_col:
+        # Scene Info Header Banner
+        status_badge_text = "● 3D RECONSTRUCTION COMPLETE" if vertex_count > 0 else "● IN PROGRESS"
+        st.markdown(
+            f"""
+            <div style="display:flex;justify-content:space-between;align-items:center;background:rgba(15,23,42,0.75);border:1px solid rgba(56,189,248,0.22);border-radius:8px;padding:8px 14px;margin-bottom:10px;">
+                <div style="display:flex;align-items:center;gap:10px;">
+                    <span style="font-size:0.90rem;font-weight:700;color:#f8fafc;">🌐 3D Digital Twin Environment</span>
+                    <span class="status-badge badge-success" style="font-size:0.70rem;padding:3px 8px;">{status_badge_text}</span>
+                </div>
+                <div style="font-size:0.75rem;color:#94a3b8;font-family:'JetBrains Mono',monospace;">
+                    <span style="color:#38bdf8;font-weight:600;">{vertex_count:,}</span> points • 
+                    <span style="color:#38bdf8;font-weight:600;">{reg_cams_count}</span> poses • 
+                    <span style="color:#38bdf8;font-weight:600;">{total_3d_objects}</span> semantic objects • 
+                    <span style="color:#cbd5e1;">Monocular SfM</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
         try:
             map_traces = []
 
@@ -785,34 +815,40 @@ with tab_3d:
 
                     map_traces.append(go.Scatter3d(
                         x=px, y=py, z=pz, mode="markers",
-                        marker=dict(size=map_pt_size, color=pt_colors, opacity=0.92),
-                        name="● 3D Point Cloud", hoverinfo="skip",
+                        marker=dict(size=map_pt_size, color=pt_colors, opacity=0.95),
+                        name="● Reconstructed Points", hoverinfo="skip",
                     ))
             else:
                 px, py, pz = np.array([]), np.array([]), np.array([])
 
+            # Scene extent and bounds for framing
+            if len(px) > 0:
+                p2_y = float(np.percentile(py, 2))
+                y_floor = p2_y - 0.05 * float(np.ptp(py))
+            else:
+                y_floor = 0.0
+
             # 2. Floor Grid Trace
-            y_floor = float(np.min(py)) - 0.3 if len(py) else 0.0
             if show_map_grid and len(px):
                 gx, gy, gz = _floor_grid(px, pz, y_floor)
                 map_traces.append(go.Scatter3d(
                     x=gx, y=gy, z=gz, mode="lines",
-                    line=dict(color="rgba(56,189,248,0.18)", width=1),
+                    line=dict(color="rgba(56,189,248,0.10)", width=1),
                     name="▦ Floor Grid", hoverinfo="skip",
                 ))
 
             # 3. Bounding Box Trace
             if show_map_bbox and len(px):
-                xmin, xmax = float(np.min(px)), float(np.max(px))
-                ymin, ymax = float(np.min(py)), float(np.max(py))
-                zmin, zmax = float(np.min(pz)), float(np.max(pz))
+                xmin, xmax = float(np.percentile(px, 1)), float(np.percentile(px, 99))
+                ymin, ymax = float(np.percentile(py, 1)), float(np.percentile(py, 99))
+                zmin, zmax = float(np.percentile(pz, 1)), float(np.percentile(pz, 99))
                 bx = [xmin, xmax, xmax, xmin, xmin, xmin, xmax, xmax, xmin, xmin, None, xmax, xmax, None, xmax, xmax, None, xmin, xmin]
                 by = [ymin, ymin, ymax, ymax, ymin, ymin, ymin, ymax, ymax, ymin, None, ymin, ymax, None, ymin, ymax, None, ymin, ymax]
                 bz = [zmin, zmin, zmin, zmin, zmin, zmax, zmax, zmax, zmax, zmax, None, zmin, zmax, None, zmax, zmax, None, zmax, zmax]
                 map_traces.append(go.Scatter3d(
                     x=bx, y=by, z=bz, mode="lines",
-                    line=dict(color="#fbbf24", width=2, dash="dash"),
-                    name=f"📏 Bounding Box ({xmax-xmin:.1f} × {ymax-ymin:.1f} × {zmax-zmin:.1f})",
+                    line=dict(color="#fbbf24", width=1.5, dash="dash"),
+                    name=f"📏 Scene Bounds ({xmax-xmin:.1f} × {ymax-ymin:.1f} × {zmax-zmin:.1f})",
                     hoverinfo="skip",
                 ))
 
@@ -825,24 +861,26 @@ with tab_3d:
                 if show_map_traj:
                     map_traces.append(go.Scatter3d(
                         x=cam_cx, y=cam_cy, z=cam_cz,
-                        mode="lines", line=dict(color="#22d3ee", width=4),
+                        mode="lines+markers",
+                        line=dict(color="#38bdf8", width=2),
+                        marker=dict(size=4, color="#38bdf8"),
                         name="━ Flight Trajectory", hoverinfo="skip",
                     ))
 
                 if show_map_cams:
                     frust_x, frust_y, frust_z = [], [], []
-                    fd = 0.08 * frustum_scale
+                    fd = 0.03 * frustum_scale
                     for cam in cameras:
                         fx, fy, fz = _frustum_lines(cam["center"], cam.get("yaw", 0.0), depth=fd)
                         frust_x += fx; frust_y += fy; frust_z += fz
                     map_traces.append(go.Scatter3d(
                         x=frust_x, y=frust_y, z=frust_z, mode="lines",
-                        line=dict(color="rgba(255,255,255,0.85)", width=1.5),
+                        line=dict(color="rgba(255,255,255,0.45)", width=1),
                         name="△ Camera Frustums", hoverinfo="skip",
                     ))
 
                     hover_text = [
-                        f"📷 Camera #{c.get('id', idx)}: {c['name']}<br>World XYZ: ({c['center'][0]:.2f}, {c['center'][1]:.2f}, {c['center'][2]:.2f})"
+                        f"<b>📷 Camera #{c.get('id', idx)}: {c['name']}</b><br>Position: ({c['center'][0]:.2f}, {c['center'][1]:.2f}, {c['center'][2]:.2f})"
                         for idx, c in enumerate(cameras)
                     ]
                     cam_mode = "markers+text" if show_map_labels else "markers"
@@ -853,7 +891,7 @@ with tab_3d:
                         mode=cam_mode,
                         text=cam_text, textposition="top center",
                         textfont=dict(size=9, color="#ffffff"),
-                        marker=dict(size=7, symbol="circle", color="#22d3ee", line=dict(color="#ffffff", width=1.5)),
+                        marker=dict(size=6, symbol="circle", color="#38bdf8", line=dict(color="#ffffff", width=1)),
                         name="◆ Camera Poses",
                         hovertext=hover_text, hoverinfo="text",
                     ))
@@ -887,19 +925,21 @@ with tab_3d:
                                 mz = [m["world_position"][2] for m in m_list]
                                 labels = [m.get("label", "Object") for m in m_list]
                                 hover = [
-                                    f"🎯 {m.get('label', 'Object')}<br>"
+                                    f"<b>{m.get('label', 'Object')}</b><br>"
                                     f"Category: {cat.capitalize()}<br>"
                                     f"Confidence: {m.get('confidence', 0.0):.2f}<br>"
-                                    f"Observations: {m.get('observation_count', 1)}<br>"
-                                    f"3D Pos: ({m['world_position'][0]:.2f}, {m['world_position'][1]:.2f}, {m['world_position'][2]:.2f})"
+                                    f"Observations: {m.get('observation_count', 1)} frame(s)<br>"
+                                    f"3D Position: ({m['world_position'][0]:.2f}, {m['world_position'][1]:.2f}, {m['world_position'][2]:.2f})"
                                     for m in m_list
                                 ]
+                                marker_mode = "markers+text" if show_sem_labels else "markers"
                                 map_traces.append(go.Scatter3d(
                                     x=mx, y=my, z=mz,
-                                    mode="markers+text",
-                                    text=labels, textposition="top center",
-                                    textfont=dict(size=10, color="#ffffff"),
-                                    marker=dict(size=9, symbol=cfg["symbol"], color=cfg["color"], line=dict(color="#ffffff", width=1.5)),
+                                    mode=marker_mode,
+                                    text=labels if show_sem_labels else None,
+                                    textposition="top center",
+                                    textfont=dict(size=9, color="#ffffff"),
+                                    marker=dict(size=8, symbol=cfg["symbol"], color=cfg["color"], line=dict(color="#ffffff", width=1.5)),
                                     name=cfg["name"],
                                     hovertext=hover, hoverinfo="text",
                                 ))
@@ -907,32 +947,32 @@ with tab_3d:
                         pass
 
             map_cam_presets = {
-                "Aerial / Top-Down (Nadir)": dict(eye=dict(x=0.0, y=3.2, z=0.0), up=dict(x=0, y=0, z=1)),
-                "Perspective Orbit":         dict(eye=dict(x=1.4, y=1.2, z=1.4)),
-                "Front Facade":              dict(eye=dict(x=0.0, y=0.4, z=3.0)),
-                "Side Elevation":            dict(eye=dict(x=3.0, y=0.4, z=0.0)),
-                "Bird's Eye Survey (60°)":   dict(eye=dict(x=0.0, y=2.5, z=0.5), up=dict(x=0, y=0, z=1)),
+                "Aerial / Isometric (45° Survey)": dict(eye=dict(x=1.35, y=-1.35, z=1.15)),
+                "Aerial Top-Down (Nadir)":          dict(eye=dict(x=0.0, y=0.0, z=2.3), up=dict(x=0, y=1, z=0)),
+                "Perspective Orbit":                dict(eye=dict(x=1.4, y=1.4, z=0.85)),
+                "Front Elevation":                  dict(eye=dict(x=0.0, y=-2.3, z=0.15)),
+                "Side Elevation":                   dict(eye=dict(x=2.3, y=0.0, z=0.15)),
             }
 
             map_fig = go.Figure(data=map_traces)
             map_fig.update_layout(
-                height=720,
+                height=760,
                 scene=dict(
                     aspectmode="data",
                     bgcolor="rgba(3,7,18,1)",
-                    xaxis=dict(backgroundcolor="rgba(3,7,18,1)", gridcolor="rgba(56,189,248,0.07)",
-                               showbackground=True, zerolinecolor="rgba(56,189,248,0.12)", showticklabels=False, title=""),
-                    yaxis=dict(backgroundcolor="rgba(3,7,18,1)", gridcolor="rgba(56,189,248,0.07)",
-                               showbackground=True, zerolinecolor="rgba(56,189,248,0.12)", showticklabels=False, title=""),
-                    zaxis=dict(backgroundcolor="rgba(3,7,18,1)", gridcolor="rgba(56,189,248,0.07)",
-                               showbackground=True, zerolinecolor="rgba(56,189,248,0.12)", showticklabels=False, title=""),
+                    xaxis=dict(backgroundcolor="rgba(3,7,18,1)", gridcolor="rgba(56,189,248,0.06)",
+                               showbackground=True, zerolinecolor="rgba(56,189,248,0.10)", showticklabels=False, title=""),
+                    yaxis=dict(backgroundcolor="rgba(3,7,18,1)", gridcolor="rgba(56,189,248,0.06)",
+                               showbackground=True, zerolinecolor="rgba(56,189,248,0.10)", showticklabels=False, title=""),
+                    zaxis=dict(backgroundcolor="rgba(3,7,18,1)", gridcolor="rgba(56,189,248,0.06)",
+                               showbackground=True, zerolinecolor="rgba(56,189,248,0.10)", showticklabels=False, title=""),
                 ),
-                scene_camera=map_cam_presets.get(map_view, map_cam_presets["Perspective Orbit"]),
+                scene_camera=map_cam_presets.get(map_view, map_cam_presets["Aerial / Isometric (45° Survey)"]),
                 paper_bgcolor="rgba(3,7,18,1)", plot_bgcolor="rgba(3,7,18,1)",
-                margin=dict(l=0, r=0, t=10, b=0),
+                margin=dict(l=0, r=0, t=5, b=0),
                 legend=dict(yanchor="top", y=0.98, xanchor="left", x=0.01,
                             bgcolor="rgba(3,7,18,0.85)", font=dict(color="#cbd5e1", size=11),
-                            bordercolor="rgba(56,189,248,0.3)", borderwidth=1),
+                            bordercolor="rgba(56,189,248,0.25)", borderwidth=1),
             )
             st.plotly_chart(map_fig, use_container_width=True)
 
