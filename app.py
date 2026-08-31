@@ -37,8 +37,10 @@ from src.nurec_pipeline import (
     NuRecAgent,
     run_nurec_pipeline,
 )
+from src.sfm_reconstruction import run_sfm_reconstruction
 from src.semantic_3d.spatial_mapping import Semantic3DManager
 from src.rescue_ai.agent import RescueAIAgent
+
 
 
 # ============================================================
@@ -263,15 +265,17 @@ data_source = st.sidebar.radio(
 recon_engine = st.sidebar.selectbox(
     "3D Reconstruction Engine:",
     [
+        "📐 OpenCV SfM (SIFT + Essential Matrix + Triangulation — Real Geometry)",
         "🟢 NVIDIA NuRec Agent (NVIDIA/nurec-skills — Neural Surface Optimizer)",
         "⚡ VGGT-Ω Agent (Visual Geometry Grounded Transformer — Dense)",
         "🧠 VGGT Agent (Visual Geometry Grounded Transformer)",
         "✨ AnySplat 3DGS Agent (InternRobotics)",
-        "📐 COLMAP + Depth Anything V2 (SfM Baseline)",
+        "🌐 Dense Depth Unproject (Baseline)",
     ],
     index=0,
-    help="Select the AI Reconstruction Agent: NVIDIA NuRec, VGGT-Ω, VGGT, AnySplat 3DGS, or COLMAP baseline.",
+    help="Select reconstruction engine. OpenCV SfM uses real SIFT feature matching and Essential Matrix pose recovery — no external binaries required.",
 )
+is_sfm_mode        = "OpenCV SfM" in recon_engine
 is_nurec_mode      = "NuRec" in recon_engine
 is_vggt_omega_mode = "VGGT-Ω" in recon_engine
 is_vggt_mode       = "VGGT" in recon_engine and not is_vggt_omega_mode
@@ -508,10 +512,23 @@ if is_custom_mode:
                         )
 
 
-                        # ── Stage 2: 3D Reconstruction (NuRec / VGGT-Ω / VGGT / AnySplat / Baseline) ──
-                        if is_nurec_mode:
+                        # ── Stage 3: 3D Reconstruction ────────────────────
+                        if is_sfm_mode:
                             status_text.markdown(
-                                "🟢 **Stage 2 — NVIDIA NuRec Agent:** Running Neural Surface Reconstruction (Instant Hash Grids & NeuS Regularizer)..."
+                                "📐 **Stage 3 — OpenCV SfM:** SIFT feature matching → RANSAC Essential Matrix "
+                                "→ Camera pose recovery → Multi-view triangulation → Depth-guided densification..."
+                            )
+                            custom_cams, pt_count = run_sfm_reconstruction(
+                                image_paths=img_paths,
+                                depth_dir=VIDEO_DEPTH_DIR,
+                                output_ply_path=POINT_CLOUD,
+                                depth_density_per_frame=900,
+                                progress_callback=lambda p, _: overall_bar.progress(0.65 + p * 0.35),
+                            )
+                            st.session_state.active_agent_name = "OpenCV SfM"
+                        elif is_nurec_mode:
+                            status_text.markdown(
+                                "🟢 **Stage 3 — NVIDIA NuRec Agent:** Running Neural Surface Reconstruction (Instant Hash Grids & NeuS Regularizer)..."
                             )
                             custom_cams, pt_count = run_nurec_pipeline(
                                 image_paths=img_paths,
@@ -523,7 +540,7 @@ if is_custom_mode:
                             st.session_state.active_agent_name = "NVIDIA NuRec Agent"
                         elif is_vggt_omega_mode:
                             status_text.markdown(
-                                "⚡ **Stage 2 — VGGT-Ω Agent:** Running Visual Geometry Grounded Transformer (Dense Geometry & Ω-Confidence Fusion)..."
+                                "⚡ **Stage 3 — VGGT-Ω Agent:** Running Visual Geometry Grounded Transformer (Dense Geometry & Ω-Confidence Fusion)..."
                             )
                             custom_cams, pt_count = run_vggt_pipeline(
                                 image_paths=img_paths,
@@ -536,7 +553,7 @@ if is_custom_mode:
                             st.session_state.active_agent_name = "VGGT-Ω Agent"
                         elif is_vggt_mode:
                             status_text.markdown(
-                                "🧠 **Stage 2 — VGGT Agent:** Running Visual Geometry Grounded Transformer (Cross-Attention 3D Pointmaps)..."
+                                "🧠 **Stage 3 — VGGT Agent:** Running Visual Geometry Grounded Transformer (Cross-Attention 3D Pointmaps)..."
                             )
                             custom_cams, pt_count = run_vggt_pipeline(
                                 image_paths=img_paths,
@@ -549,7 +566,7 @@ if is_custom_mode:
                             st.session_state.active_agent_name = "VGGT Agent"
                         elif is_anysplat_mode:
                             status_text.markdown(
-                                "✨ **Stage 2 — AnySplat 3DGS Agent:** Running Pose-Free Feed-Forward 3D Gaussian Splatting..."
+                                "✨ **Stage 3 — AnySplat 3DGS Agent:** Running Pose-Free Feed-Forward 3D Gaussian Splatting..."
                             )
                             custom_cams, pt_count = run_anysplat_pipeline(
                                 image_paths=img_paths,
@@ -561,7 +578,7 @@ if is_custom_mode:
                             st.session_state.active_agent_name = "AnySplat 3DGS"
                         else:
                             status_text.markdown(
-                                "🌐 **Stage 2 — Dense 3D Reconstruction:** Unprojecting depth + RGB into world-space 3D map..."
+                                "🌐 **Stage 3 — Dense Depth Unproject:** Unprojecting depth + RGB into world-space 3D map..."
                             )
                             custom_cams, pt_count = estimate_point_cloud_and_trajectory(
                                 image_paths=img_paths,
@@ -571,7 +588,7 @@ if is_custom_mode:
                                 max_points_per_frame=1200,
                                 progress_callback=lambda p, _: overall_bar.progress(0.65 + p * 0.35),
                             )
-                            st.session_state.active_agent_name = "Dense 3D Map"
+                            st.session_state.active_agent_name = "Dense Depth Unproject"
 
                         overall_bar.progress(1.0)
                         model_name = st.session_state.active_agent_name
