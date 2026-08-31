@@ -27,9 +27,7 @@ wheels/
 .installed.cfg
 *.egg
 
-# IDE & Editor files
-.vscode/
-.idea/
+# IDE & Editor files (tracked for team consistency)
 *.swp
 *.swo
 .DS_Store
