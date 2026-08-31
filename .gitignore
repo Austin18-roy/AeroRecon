@@ -36,3 +36,7 @@ Thumbs.db
 # User session data
 data/input/uploaded_session/
 data/input/test_video_session/
+outputs/video_frames/*.png
+outputs/video_depth/*.png
+outputs/video_detections/*.jpg
+outputs/video_reconstruction/*.ply
