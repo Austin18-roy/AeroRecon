@@ -98,6 +98,43 @@ st.markdown(
         padding: 20px;
         margin-bottom: 20px;
     }
+    .roadmap-card {
+        background: rgba(255, 255, 255, 0.02);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 10px;
+        padding: 16px 18px;
+        margin-bottom: 0;
+        position: relative;
+    }
+    .roadmap-stage-label {
+        font-size: 0.68rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        margin-bottom: 6px;
+    }
+    .roadmap-title {
+        font-size: 1.0rem;
+        font-weight: 700;
+        color: #f8fafc;
+        margin-bottom: 4px;
+    }
+    .roadmap-desc {
+        font-size: 0.80rem;
+        color: #94a3b8;
+        line-height: 1.5;
+    }
+    .stage-active { color: #22c55e; }
+    .stage-next   { color: #38bdf8; }
+    .stage-future { color: #94a3b8; }
+    .compare-label {
+        text-align: center;
+        font-size: 0.75rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        padding: 4px 0 8px 0;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -779,7 +816,6 @@ if POINT_CLOUD.exists():
 
         fig = go.Figure(data=traces)
 
-        # View preset camera
         camera_presets = {
             "Perspective": dict(eye=dict(x=1.6, y=1.6, z=1.2)),
             "Top":         dict(eye=dict(x=0, y=0, z=3.0), up=dict(x=0, y=1, z=0)),
@@ -867,23 +903,159 @@ with interp3:
         unsafe_allow_html=True,
     )
 
-# Reconstruction status & roadmap
-recon1, recon2 = st.columns([1, 1])
-with recon1:
-    st.info(
-        "**Current prototype:** The system currently produces a sparse offline reconstruction "
-        "from overlapping UAV frames. This demonstrates camera-pose estimation, feature "
-        "triangulation, and 3D scene visualization."
+st.divider()
+
+
+# ============================================================
+# 7. AI RECONSTRUCTION ROADMAP: CURRENT vs TARGET
+# ============================================================
+
+st.markdown("### 🔬 Reconstruction Methodology: Current vs Target")
+
+st.info(
+    "**Our current prototype uses COLMAP for sparse geometric reconstruction. "
+    "We are evaluating AI-based reconstruction models such as VGGT and Gaussian Splatting "
+    "to evolve this toward denser and eventually incremental 3D mapping.**"
+)
+
+# Side-by-side comparison
+cmp_left, cmp_right = st.columns(2)
+
+with cmp_left:
+    st.markdown(
+        "<div class='compare-label' style='color:#fbbf24;'>◀ CURRENT PROTOTYPE — Sparse SfM (COLMAP)</div>",
+        unsafe_allow_html=True,
     )
-with recon2:
-    st.info(
-        "**Next stage:** Incremental reconstruction will allow new UAV frames to update the "
-        "3D environment continuously, leading toward real-time and denser spatial mapping."
+    st.markdown(
+        """
+        <div class="roadmap-card">
+            <div class="roadmap-stage-label stage-active">✓ ACTIVE — Stage 1</div>
+            <div class="roadmap-title">COLMAP Sparse Reconstruction</div>
+            <div class="roadmap-desc">
+                Structure-from-Motion pipeline that recovers <strong>camera poses</strong> and
+                <strong>triangulates 209 sparse 3D feature points</strong> from 10 overlapping UAV images.
+                Output is an interactive sparse point cloud suitable for camera-pose validation
+                and geometric verification.
+                <br><br>
+                <span style="color:#fbbf24;">Limitation:</span> Produces only a skeletal scene representation —
+                geometry is sparse, lacks surface texture, and requires offline batch processing.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+with cmp_right:
+    st.markdown(
+        "<div class='compare-label' style='color:#38bdf8;'>TARGET — Dense 3D Gaussian Splatting (AnySplat)</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        """
+        <div class="roadmap-card" style="border-color: rgba(56,189,248,0.25);">
+            <div class="roadmap-stage-label stage-next">⟳ EVALUATING — Stage 2</div>
+            <div class="roadmap-title">AnySplat / VGGT Dense Gaussian Splatting</div>
+            <div class="roadmap-desc">
+                Feed-forward 3D Gaussian Splatting from <strong>uncalibrated images in a single forward pass</strong>.
+                Jointly predicts camera poses, per-pixel depth maps, and dense 3D Gaussian primitives —
+                producing a <strong>photorealistic, textured 3D scene</strong> suitable for immersive
+                inspection and spatial reasoning.
+                <br><br>
+                <span style="color:#38bdf8;">Advantage:</span> No iterative optimization required.
+                Millions of RGB-colored Gaussians vs. 209 sparse points.
+                Real-time novel-view synthesis ready.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+# Show the target image
+ASSETS_DIR = ROOT / "assets"
+anysplat_img_path = ASSETS_DIR / "anysplat_target.jpg"
+if anysplat_img_path.exists():
+    st.image(
+        str(anysplat_img_path),
+        caption=(
+            "Target output: Dense 3D Gaussian Splatting (AnySplat) — photorealistic aerial scene reconstruction "
+            "with camera frustums and flight trajectory overlay. "
+            "Source: InternRobotics/AnySplat (github.com/InternRobotics/AnySplat)"
+        ),
+        width="stretch",
+    )
+
+# Comparison table
+st.markdown("#### Reconstruction Method Comparison")
+st.markdown(
+    """
+    | Metric | COLMAP (Current) | Depth Anything V2 | AnySplat / VGGT (Target) |
+    |:---|:---|:---|:---|
+    | **Output** | 209 sparse 3D points | 2D relative depth maps | Millions of dense 3D Gaussians |
+    | **Camera Poses** | Iterative SfM (offline) | None (monocular 2D) | Jointly predicted (feed-forward) |
+    | **Processing** | Minutes (batch) | ~100 ms/frame | ~1–3 s (full scene) |
+    | **Scene Rendering** | Scatter plot only | 2D image only | Photorealistic novel-view synthesis |
+    | **Pose Requirement** | Required before reconstruction | Not applicable | None — pose-free |
+    | **Real-Time Ready** | No | Partial | Yes (feed-forward) |
+    """
+)
+
+# Stage Roadmap Cards
+st.markdown("#### Technology Evolution Roadmap")
+r1, r2, r3, r4 = st.columns(4)
+
+with r1:
+    st.markdown(
+        """
+        <div class="roadmap-card">
+            <div class="roadmap-stage-label stage-active">✓ CURRENT MVD</div>
+            <div class="roadmap-title">Sparse SfM</div>
+            <div class="roadmap-desc">COLMAP offline sparse reconstruction + Depth Anything V2 + YOLO11s</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+with r2:
+    st.markdown(
+        """
+        <div class="roadmap-card" style="border-color:rgba(56,189,248,0.25);">
+            <div class="roadmap-stage-label stage-next">⟳ EVALUATING</div>
+            <div class="roadmap-title">Dense 3DGS</div>
+            <div class="roadmap-desc">AnySplat / VGGT — pose-free dense Gaussian Splatting from UAV sequences</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+with r3:
+    st.markdown(
+        """
+        <div class="roadmap-card" style="border-color:rgba(168,85,247,0.2);">
+            <div class="roadmap-stage-label stage-future">◇ NEXT STAGE</div>
+            <div class="roadmap-title">Incremental Mapping</div>
+            <div class="roadmap-desc">Online 3D scene updates from streaming UAV frames — real-time spatial mapping</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+with r4:
+    st.markdown(
+        """
+        <div class="roadmap-card" style="border-color:rgba(168,85,247,0.15);">
+            <div class="roadmap-stage-label stage-future">◇ FUTURE</div>
+            <div class="roadmap-title">Rescue AI Navigation</div>
+            <div class="roadmap-desc">Autonomous drone navigation using live 3D environment understanding for rescue operations</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
 st.caption(
-    "**Future development:** Sparse offline reconstruction → incremental 3D mapping → "
-    "real-time scene reconstruction → Rescue AI spatial reasoning → autonomous rescue drone navigation."
+    "AI reconstruction model reference: "
+    "[InternRobotics/AnySplat](https://github.com/InternRobotics/AnySplat) · "
+    "Feed-forward 3D Gaussian Splatting from unconstrained views. "
+    "VGGT: Visual Geometry Grounded Transformer for multi-view geometry estimation."
 )
 
 
@@ -899,11 +1071,18 @@ st.markdown(
     """
 **UAV Video / Images**
 → **Intelligent Keyframe Extraction**
-→ **Camera Trajectory Reconstruction**
-→ **Depth Anything V2**
-→ **YOLO Object Detection**
-→ **Interactive 3D Visualization**
+→ **YOLO11s Object Detection**
+→ **Depth Anything V2 — Relative Depth**
+→ **COLMAP Sparse 3D Reconstruction**
+→ **Interactive 3D WebGL Visualization**
+→ **[Evaluating] AnySplat / VGGT Dense 3D Gaussian Splatting**
 """
 )
 
 st.success("✅ Minimum Viable Demonstrator ready for evaluation.")
+st.info(
+    "🔬 **Research Evolution:** Sparse offline reconstruction (COLMAP) → "
+    "Dense feed-forward Gaussian Splatting (AnySplat) → "
+    "Incremental real-time 3D mapping → Rescue AI spatial reasoning → "
+    "Autonomous rescue drone navigation."
+)
