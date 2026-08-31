@@ -121,9 +121,36 @@ def extract_keyframes(
     return extracted
 
 
-# ─────────────────────────────────────────────
-# Stage 1b: YOLO11s Object Detection
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 1b: YOLO11s Object Detection + ByteTrack Persistent Tracking
+# ─────────────────────────────────────────────────────────────────────────────
+
+# COCO class IDs for the target categories we care about:
+#   Persons: 0
+#   Vehicles: 1 (bicycle), 2 (car), 3 (motorcycle), 5 (bus), 7 (truck)
+#   Animals: 14 (bird), 15 (cat), 16 (dog), 17 (horse), 18 (sheep),
+#            19 (cow), 20 (elephant), 21 (bear), 22 (zebra), 23 (giraffe)
+_TARGET_CLASSES = [0, 1, 2, 3, 5, 7, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+
+_COCO_CLASS_NAMES = {
+    0: "person",
+    1: "bicycle",
+    2: "car",
+    3: "motorcycle",
+    5: "bus",
+    7: "truck",
+    14: "bird",
+    15: "cat",
+    16: "dog",
+    17: "horse",
+    18: "sheep",
+    19: "cow",
+    20: "elephant",
+    21: "bear",
+    22: "zebra",
+    23: "giraffe",
+}
+
 
 def run_yolo_on_keyframes(
     image_paths: List[Path],
@@ -131,52 +158,178 @@ def run_yolo_on_keyframes(
     model_path: str = "yolo11s.pt",
     conf: float = 0.30,
     imgsz: int = 1280,
+    frame_timestamps: Optional[Dict[str, float]] = None,
     progress_callback: Optional[callable] = None,
 ) -> Dict[str, int]:
     """
-    Runs YOLO11s aerial object detection on extracted keyframes.
-    Saves annotated images and returns per-frame detection counts.
+    Runs YOLO11s detection with ByteTrack persistent object tracking across keyframes.
+
+    Outputs:
+      - Annotated JPEG images (for the existing Streamlit UI display).
+      - ``detections.jsonl`` — one JSON record per detection per frame, containing:
+          frame_id, timestamp_sec, track_id, class_id, class_name, confidence,
+          bbox [x1, y1, x2, y2]
+      - ``detections_summary.json`` — per-frame counts + run-level statistics.
+
+    Args:
+      image_paths:      Ordered list of keyframe paths (must be consistent between runs).
+      output_dir:       Destination for annotated images and metadata files.
+      model_path:       YOLO model filename relative to project root.
+      conf:             Confidence threshold (0–1).
+      imgsz:            Inference image size.
+      frame_timestamps: Optional mapping {frame_stem: timestamp_sec}. If None the
+                        frame index is used as a surrogate.
+      progress_callback: Optional callback(fraction, message).
+
+    Returns:
+      Dict mapping frame stem → detection count (same contract as before).
     """
+    import json
     from ultralytics import YOLO
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    for f in output_dir.glob("*.jpg"):
+    # ── Clean stale outputs from any previous run ─────────────────────────────
+    for stale in output_dir.glob("*.jpg"):
         try:
-            f.unlink()
+            stale.unlink()
+        except Exception:
+            pass
+    for stale in output_dir.glob("*.jsonl"):
+        try:
+            stale.unlink()
+        except Exception:
+            pass
+    for stale in output_dir.glob("*.json"):
+        try:
+            stale.unlink()
         except Exception:
             pass
 
+    # ── Load model ────────────────────────────────────────────────────────────
     model_file = ROOT / model_path
     if not model_file.exists():
         fallback = ROOT / "yolo11n.pt"
         model_file = fallback if fallback.exists() else Path(model_path)
 
     model = YOLO(str(model_file))
-    target_classes = [0, 1, 2, 3, 5, 7]  # person, bicycle, car, motorcycle, bus, truck
 
-    detection_counts = {}
+    detection_counts: Dict[str, int] = {}
+    jsonl_path = output_dir / "detections.jsonl"
 
-    for i, img_path in enumerate(image_paths, 1):
-        results = model.predict(
-            source=str(img_path),
-            device="cpu",
-            conf=conf,
-            imgsz=imgsz,
-            classes=target_classes,
-            save=False,
-            verbose=False,
-        )
-        result = results[0]
-        boxes = result.boxes
-        detection_counts[img_path.stem] = len(boxes) if boxes is not None else 0
+    # ── Run YOLO track across each keyframe ───────────────────────────────────
+    # ByteTrack maintains track IDs across frames when persist=True and frames
+    # are fed in the same model session.  We feed them sequentially so track
+    # IDs are stable within one video processing run.
+    with open(jsonl_path, "w", encoding="utf-8") as jsonl_fh:
+        for i, img_path in enumerate(image_paths):
+            frame_stem = img_path.stem
+            ts_sec = (
+                frame_timestamps.get(frame_stem, float(i))
+                if frame_timestamps
+                else float(i)
+            )
 
-        annotated = result.plot()
-        cv2.imwrite(str(output_dir / f"{img_path.stem}.jpg"), annotated)
+            try:
+                results = model.track(
+                    source=str(img_path),
+                    tracker="bytetrack.yaml",  # bundled with ultralytics
+                    persist=True,              # carry track state across frames
+                    device="cpu",
+                    conf=conf,
+                    imgsz=imgsz,
+                    classes=_TARGET_CLASSES,
+                    save=False,
+                    verbose=False,
+                )
+            except Exception as track_exc:
+                # Fall back to plain predict if tracking fails (e.g. single frame)
+                results = model.predict(
+                    source=str(img_path),
+                    device="cpu",
+                    conf=conf,
+                    imgsz=imgsz,
+                    classes=_TARGET_CLASSES,
+                    save=False,
+                    verbose=False,
+                )
 
-        if progress_callback:
-            progress_callback(i / len(image_paths), f"Detected frame {i}/{len(image_paths)}")
+            result = results[0]
+            boxes = result.boxes
+
+            frame_count = 0
+
+            if boxes is not None and len(boxes) > 0:
+                # boxes.xyxy  → (N, 4) float32  [x1, y1, x2, y2]
+                # boxes.id    → (N, 1) float32 track IDs (None if tracking not used)
+                # boxes.cls   → (N, 1) float32 class IDs
+                # boxes.conf  → (N, 1) float32 confidence
+                xyxy = boxes.xyxy.cpu().numpy()
+                cls_ids = boxes.cls.cpu().numpy().astype(int)
+                confs = boxes.conf.cpu().numpy()
+                track_ids = (
+                    boxes.id.cpu().numpy().astype(int)
+                    if boxes.id is not None
+                    else [None] * len(xyxy)
+                )
+
+                for bbox, cls_id, conf_val, tid in zip(xyxy, cls_ids, confs, track_ids):
+                    x1, y1, x2, y2 = bbox.tolist()
+                    record = {
+                        "frame_id": frame_stem,
+                        "timestamp_sec": round(ts_sec, 4),
+                        "track_id": int(tid) if tid is not None else None,
+                        "class_id": int(cls_id),
+                        "class_name": _COCO_CLASS_NAMES.get(int(cls_id), f"class_{cls_id}"),
+                        "confidence": round(float(conf_val), 4),
+                        "bbox": [round(x1, 1), round(y1, 1), round(x2, 1), round(y2, 1)],
+                    }
+                    jsonl_fh.write(json.dumps(record) + "\n")
+                    frame_count += 1
+
+            detection_counts[frame_stem] = frame_count
+
+            # Save annotated JPEG (required by existing UI)
+            annotated = result.plot()
+            cv2.imwrite(str(output_dir / f"{frame_stem}.jpg"), annotated)
+
+            if progress_callback:
+                progress_callback(
+                    (i + 1) / len(image_paths),
+                    f"Detected frame {i + 1}/{len(image_paths)}: {frame_count} objects",
+                )
+
+    # ── Write per-run summary JSON ─────────────────────────────────────────────
+    total_detections = sum(detection_counts.values())
+    unique_classes: Dict[str, int] = {}
+    try:
+        with open(jsonl_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                cn = rec.get("class_name", "unknown")
+                unique_classes[cn] = unique_classes.get(cn, 0) + 1
+    except Exception:
+        pass
+
+    summary = {
+        "frames_processed": len(image_paths),
+        "total_detections": total_detections,
+        "per_frame_counts": detection_counts,
+        "class_totals": unique_classes,
+        "tracker": "ByteTrack (ultralytics built-in)",
+        "model": str(model_file.name),
+        "conf_threshold": conf,
+        "target_classes": _TARGET_CLASSES,
+    }
+    summary_path = output_dir / "detections_summary.json"
+    with open(summary_path, "w", encoding="utf-8") as sf:
+        json.dump(summary, sf, indent=2)
 
     return detection_counts
+
 
 
 # ─────────────────────────────────────────────

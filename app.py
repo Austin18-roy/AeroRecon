@@ -471,14 +471,23 @@ if is_custom_mode:
                             "🔎 **Stage 1b — YOLO11s Detection:** Identifying aerial vehicles, persons, and infrastructure..."
                         )
                         VIDEO_YOLO_DIR.mkdir(parents=True, exist_ok=True)
+                        # Build timestamp mapping from extracted keyframe records
+                        _frame_ts_map = {
+                            kf["name"].replace(".png", ""): kf.get("timestamp", float(idx))
+                            for idx, kf in enumerate(keyframes)
+                        }
                         det_counts = run_yolo_on_keyframes(
                             image_paths=img_paths,
                             output_dir=VIDEO_YOLO_DIR,
                             conf=yolo_conf,
+                            frame_timestamps=_frame_ts_map,
                             progress_callback=lambda p, _: overall_bar.progress(0.20 + p * 0.20),
                         )
                         total_dets = sum(det_counts.values())
-                        st.success(f"✓ Stage 1b complete — {total_dets} detections across {len(det_counts)} frames into outputs/video_detections/")
+                        st.success(
+                            f"✓ Stage 1b complete — {total_dets} detections across {len(det_counts)} frames "
+                            f"| Metadata: outputs/video_detections/detections.jsonl"
+                        )
 
                         # ── Stage 1c: Depth Anything V2 ───────────────────
                         status_text.markdown(
