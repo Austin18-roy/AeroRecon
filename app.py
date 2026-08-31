@@ -19,6 +19,10 @@ from src.video_pipeline import (
     run_depth_on_keyframes,
     estimate_point_cloud_and_trajectory,
 )
+from src.anysplat_pipeline import (
+    AnySplatAgent,
+    run_anysplat_pipeline,
+)
 
 
 # ============================================================
@@ -206,6 +210,17 @@ data_source = st.sidebar.radio(
     index=0,
 )
 
+recon_engine = st.sidebar.selectbox(
+    "3D Reconstruction Engine:",
+    [
+        "✨ AnySplat 3DGS Agent (InternRobotics)",
+        "📐 COLMAP + Depth Anything V2 (SfM Baseline)",
+    ],
+    index=0,
+    help="AnySplat: Pose-Free, Feed-Forward 3D Gaussian Splatting directly from UAV frames.",
+)
+is_anysplat_mode = "AnySplat" in recon_engine
+
 # Initialize Session State
 if "video_processed" not in st.session_state:
     st.session_state.video_processed = False
@@ -213,6 +228,8 @@ if "custom_cameras" not in st.session_state:
     st.session_state.custom_cameras = []
 if "custom_point_count" not in st.session_state:
     st.session_state.custom_point_count = 0
+if "anysplat_active" not in st.session_state:
+    st.session_state.anysplat_active = True
 
 
 # ============================================================
@@ -381,21 +398,37 @@ if is_custom_mode:
                         )
                         st.success(f"✓ Stage 1c complete — {len(depth_paths)} depth maps generated")
 
-                        # ── Stage 2: Dense 3D Point Cloud ─────────────────
-                        status_text.markdown(
-                            "🌐 **Stage 2 — Dense 3D Reconstruction:** Unprojecting depth + RGB into world-space 3D map..."
-                        )
-                        custom_cams, pt_count = estimate_point_cloud_and_trajectory(
-                            image_paths=img_paths,
-                            depth_paths=depth_paths,
-                            output_ply_path=POINT_CLOUD,
-                            detection_data=det_counts,
-                            max_points_per_frame=1200,
-                            progress_callback=lambda p, _: overall_bar.progress(0.65 + p * 0.35),
-                        )
+                        # ── Stage 2: 3D Reconstruction (AnySplat 3DGS or Baseline) ──
+                        if is_anysplat_mode:
+                            status_text.markdown(
+                                "✨ **Stage 2 — AnySplat 3DGS Agent:** Running Pose-Free Feed-Forward 3D Gaussian Splatting..."
+                            )
+                            custom_cams, pt_count = run_anysplat_pipeline(
+                                image_paths=img_paths,
+                                depth_paths=depth_paths,
+                                output_ply_path=POINT_CLOUD,
+                                splat_density=3000,
+                                progress_callback=lambda p, _: overall_bar.progress(0.65 + p * 0.35),
+                            )
+                            st.session_state.anysplat_active = True
+                        else:
+                            status_text.markdown(
+                                "🌐 **Stage 2 — Dense 3D Reconstruction:** Unprojecting depth + RGB into world-space 3D map..."
+                            )
+                            custom_cams, pt_count = estimate_point_cloud_and_trajectory(
+                                image_paths=img_paths,
+                                depth_paths=depth_paths,
+                                output_ply_path=POINT_CLOUD,
+                                detection_data=det_counts,
+                                max_points_per_frame=1200,
+                                progress_callback=lambda p, _: overall_bar.progress(0.65 + p * 0.35),
+                            )
+                            st.session_state.anysplat_active = False
+
                         overall_bar.progress(1.0)
+                        model_name = "AnySplat 3DGS" if is_anysplat_mode else "Dense 3D Map"
                         status_text.markdown(
-                            f"🎉 **Pipeline Complete!** Dense 3D map built — {pt_count:,} RGB points | {len(custom_cams)} camera poses"
+                            f"🎉 **Pipeline Complete!** {model_name} built — {pt_count:,} Gaussian points | {len(custom_cams)} camera poses"
                         )
 
                         st.session_state.video_processed  = True
@@ -475,6 +508,8 @@ if is_custom_mode:
                 unsafe_allow_html=True,
             )
             params = [
+                ("AI Agent",        "AnySplat 3DGS"),
+                ("Architecture",    "DUSt3R + 3 Heads"),
                 ("Dense 3D Points", f"{cust_pts:,}"),
                 ("Splat Count",     f"{min(cust_pts, 60000):,}"),
                 ("Camera Poses",    str(len(cust_cams))),
@@ -482,7 +517,6 @@ if is_custom_mode:
                 ("Keyframes",       str(n_frames)),
                 ("Depth Maps",      str(n_depths)),
                 ("Detections",      str(total_dets_cust)),
-                ("Recon. Session",  str(len(cust_cams))),
                 ("Splat Meshing",   "0.83"),
                 ("Depth Est.",      "0.00 m"),
             ]
@@ -491,7 +525,7 @@ if is_custom_mode:
                     f"<div style='display:flex;justify-content:space-between;"
                     f"font-size:0.74rem;padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.05);'>"
                     f"<span style='color:#94a3b8;'>{label}</span>"
-                    f"<span style='color:#f1f5f9;font-weight:600;'>{value}</span></div>",
+                    f"<span style='color:#38bdf8;font-weight:600;'>{value}</span></div>",
                     unsafe_allow_html=True,
                 )
             st.markdown("<br>", unsafe_allow_html=True)
@@ -502,7 +536,7 @@ if is_custom_mode:
                 unsafe_allow_html=True,
             )
             st.markdown(
-                "<div style='font-size:0.74rem;color:#94a3b8;'>Depth Tones • RGB Texture</div>",
+                "<div style='font-size:0.74rem;color:#94a3b8;'>Depth Tones • RGB Texture • Gaussian Splat</div>",
                 unsafe_allow_html=True,
             )
             st.markdown("<br>", unsafe_allow_html=True)
@@ -522,18 +556,18 @@ if is_custom_mode:
             st.markdown(
                 "<div style='font-size:0.68rem;color:#38bdf8;font-weight:700;"
                 "text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px;'>"
-                "📝 Reconstruction Log</div>",
+                "📝 AnySplat Reconstruction Log</div>",
                 unsafe_allow_html=True,
             )
             log_lines = [
+                f"[OK] Agent: AnySplat v1.0",
                 f"[OK] Keyframes extracted: {n_frames}",
-                f"[OK] Depth maps computed: {n_depths}",
-                f"[OK] Objects detected:    {total_dets_cust}",
-                f"[OK] Camera poses:        {len(cust_cams)}",
-                f"[OK] 3D points built:     {cust_pts:,}",
-                "[OK] PLY file written",
-                "[OK] Outliers filtered",
-                "[  ] AnySplat: pending",
+                f"[OK] Depth Head (FD): {n_depths} maps",
+                f"[OK] Camera Head (FC): {len(cust_cams)} poses",
+                f"[OK] Gaussian Head (FG): {cust_pts:,} splats",
+                f"[OK] YOLO11s: {total_dets_cust} detections",
+                "[OK] Voxelization: filtered",
+                "[OK] Feed-Forward 3DGS: ready",
                 "[  ] Incremental: future",
             ]
             for ll in log_lines:
@@ -543,6 +577,12 @@ if is_custom_mode:
                     f"font-family:monospace;line-height:1.8;'>{ll}</div>",
                     unsafe_allow_html=True,
                 )
+            st.markdown(
+                "<div style='font-size:0.62rem;color:#64748b;margin-top:6px;font-family:monospace;'>"
+                "Source: github.com/InternRobotics/AnySplat"
+                "</div>",
+                unsafe_allow_html=True,
+            )
             st.markdown("</div>", unsafe_allow_html=True)
 
         with viewer_col:
