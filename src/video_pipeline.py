@@ -4,8 +4,9 @@ AeroRecon Video Pipeline
 Full end-to-end pipeline: UAV video → keyframes → YOLO11s → Depth Anything V2 → Dense 3D Map
 
 Stages implemented:
-  Stage 1 (MVD)     : Keyframe extraction + YOLO11s + Depth Anything V2 + Dense 3D point cloud
-  Stage 2 (Eval)    : Simulated AnySplat-style output from dense depth unprojection + RGB coloring
+  Stage 1a (MVD)    : Keyframe extraction + Laplacian sharpness scoring
+  Stage 1b          : YOLO11s + ByteTrack persistent object tracking
+  Stage 2           : Depth Anything V2 relative depth → .npy + PNG + metadata
   Stage 3 (Future)  : Incremental mapping placeholder
   Stage 4 (Future)  : Rescue AI navigation placeholder
 """
@@ -166,30 +167,30 @@ def run_yolo_on_keyframes(
 
     Outputs:
       - Annotated JPEG images (for the existing Streamlit UI display).
-      - ``detections.jsonl`` — one JSON record per detection per frame, containing:
+      - ``detections.jsonl`` - one JSON record per detection per frame, containing:
           frame_id, timestamp_sec, track_id, class_id, class_name, confidence,
           bbox [x1, y1, x2, y2]
-      - ``detections_summary.json`` — per-frame counts + run-level statistics.
+      - ``detections_summary.json`` - per-frame counts + run-level statistics.
 
     Args:
       image_paths:      Ordered list of keyframe paths (must be consistent between runs).
       output_dir:       Destination for annotated images and metadata files.
       model_path:       YOLO model filename relative to project root.
-      conf:             Confidence threshold (0–1).
+      conf:             Confidence threshold (0-1).
       imgsz:            Inference image size.
       frame_timestamps: Optional mapping {frame_stem: timestamp_sec}. If None the
                         frame index is used as a surrogate.
       progress_callback: Optional callback(fraction, message).
 
     Returns:
-      Dict mapping frame stem → detection count (same contract as before).
+      Dict mapping frame stem to detection count (same contract as before).
     """
     import json
     from ultralytics import YOLO
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Clean stale outputs from any previous run ─────────────────────────────
+    # Clean stale outputs from any previous run
     for stale in output_dir.glob("*.jpg"):
         try:
             stale.unlink()
@@ -206,7 +207,6 @@ def run_yolo_on_keyframes(
         except Exception:
             pass
 
-    # ── Load model ────────────────────────────────────────────────────────────
     model_file = ROOT / model_path
     if not model_file.exists():
         fallback = ROOT / "yolo11n.pt"
@@ -217,10 +217,6 @@ def run_yolo_on_keyframes(
     detection_counts: Dict[str, int] = {}
     jsonl_path = output_dir / "detections.jsonl"
 
-    # ── Run YOLO track across each keyframe ───────────────────────────────────
-    # ByteTrack maintains track IDs across frames when persist=True and frames
-    # are fed in the same model session.  We feed them sequentially so track
-    # IDs are stable within one video processing run.
     with open(jsonl_path, "w", encoding="utf-8") as jsonl_fh:
         for i, img_path in enumerate(image_paths):
             frame_stem = img_path.stem
@@ -233,8 +229,8 @@ def run_yolo_on_keyframes(
             try:
                 results = model.track(
                     source=str(img_path),
-                    tracker="bytetrack.yaml",  # bundled with ultralytics
-                    persist=True,              # carry track state across frames
+                    tracker="bytetrack.yaml",
+                    persist=True,
                     device="cpu",
                     conf=conf,
                     imgsz=imgsz,
@@ -242,8 +238,7 @@ def run_yolo_on_keyframes(
                     save=False,
                     verbose=False,
                 )
-            except Exception as track_exc:
-                # Fall back to plain predict if tracking fails (e.g. single frame)
+            except Exception:
                 results = model.predict(
                     source=str(img_path),
                     device="cpu",
@@ -256,14 +251,9 @@ def run_yolo_on_keyframes(
 
             result = results[0]
             boxes = result.boxes
-
             frame_count = 0
 
             if boxes is not None and len(boxes) > 0:
-                # boxes.xyxy  → (N, 4) float32  [x1, y1, x2, y2]
-                # boxes.id    → (N, 1) float32 track IDs (None if tracking not used)
-                # boxes.cls   → (N, 1) float32 class IDs
-                # boxes.conf  → (N, 1) float32 confidence
                 xyxy = boxes.xyxy.cpu().numpy()
                 cls_ids = boxes.cls.cpu().numpy().astype(int)
                 confs = boxes.conf.cpu().numpy()
@@ -288,8 +278,6 @@ def run_yolo_on_keyframes(
                     frame_count += 1
 
             detection_counts[frame_stem] = frame_count
-
-            # Save annotated JPEG (required by existing UI)
             annotated = result.plot()
             cv2.imwrite(str(output_dir / f"{frame_stem}.jpg"), annotated)
 
@@ -299,7 +287,6 @@ def run_yolo_on_keyframes(
                     f"Detected frame {i + 1}/{len(image_paths)}: {frame_count} objects",
                 )
 
-    # ── Write per-run summary JSON ─────────────────────────────────────────────
     total_detections = sum(detection_counts.values())
     unique_classes: Dict[str, int] = {}
     try:
@@ -331,41 +318,172 @@ def run_yolo_on_keyframes(
     return detection_counts
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 2: Depth Anything V2 – Relative Depth Estimation
+# ─────────────────────────────────────────────────────────────────────────────
 
-# ─────────────────────────────────────────────
-# Stage 1c: Depth Anything V2
-# ─────────────────────────────────────────────
+_DEPTH_MODEL_ID = "depth-anything/Depth-Anything-V2-Small-hf"
+
 
 def run_depth_on_keyframes(
     image_paths: List[Path],
     output_dir: Path,
+    frame_timestamps: Optional[Dict[str, float]] = None,
     progress_callback: Optional[callable] = None,
 ) -> List[Path]:
-    """Runs Depth Anything V2 relative depth estimation on all keyframes."""
-    from transformers import pipeline as hf_pipeline
+    """
+    Runs Depth Anything V2 relative depth estimation on all keyframes.
+
+    For every processed frame this function saves:
+      depth_{stem}.npy   -- lossless float32 normalized relative depth [0, 1].
+                            Normalised so 0 = furthest, 1 = nearest.
+                            Machine-usable representation for downstream 3D
+                            reconstruction.
+      depth_{stem}.png   -- uint8 greyscale visualization (backward-compatible
+                            with the existing 3D reconstruction pipeline which
+                            reads these PNGs).
+
+    A ``depth_metadata.json`` file is written to output_dir summarising every
+    processed frame with:
+      frame_id, source_filename, timestamp_sec, width, height,
+      depth_npy, depth_png, model, depth_type.
+
+    IMPORTANT: This function preserves the original relative depth output of
+    Depth Anything V2. It does NOT convert relative depth to metric distance.
+
+    Args:
+      image_paths:       Ordered list of keyframe image Paths to process.
+      output_dir:        Directory for all depth outputs (npy + png + json).
+      frame_timestamps:  Optional {frame_stem: float} mapping for metadata.
+                         If None, the frame index is used as a surrogate.
+      progress_callback: Optional callback(fraction, message) for UI progress.
+
+    Returns:
+      List of Paths to the PNG visualization files (one per successfully
+      processed frame, same order as image_paths). Unchanged contract for
+      the downstream reconstruction stage.
+    """
+    import json
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Clear stale depth outputs so previous runs cannot contaminate
+    for stale in output_dir.glob("depth_*.png"):
+        try:
+            stale.unlink()
+        except Exception:
+            pass
+    for stale in output_dir.glob("depth_*.npy"):
+        try:
+            stale.unlink()
+        except Exception:
+            pass
+    stale_meta = output_dir / "depth_metadata.json"
+    if stale_meta.exists():
+        try:
+            stale_meta.unlink()
+        except Exception:
+            pass
+
+    # Load model once (lazy import to keep startup fast when not running depth)
+    from transformers import pipeline as hf_pipeline
     pipe = hf_pipeline(
         task="depth-estimation",
-        model="depth-anything/Depth-Anything-V2-Small-hf",
-        device=-1,
+        model=_DEPTH_MODEL_ID,
+        device=-1,  # CPU
     )
 
-    depth_paths = []
+    depth_png_paths: List[Path] = []
+    metadata_records: List[Dict] = []
 
-    for i, img_path in enumerate(image_paths, 1):
-        image  = Image.open(img_path).convert("RGB")
-        result = pipe(image)
-        depth_img = result["depth"]
-        out_path  = output_dir / f"depth_{img_path.stem}.png"
-        depth_img.save(out_path)
-        depth_paths.append(out_path)
+    for i, img_path in enumerate(image_paths):
+        frame_stem = img_path.stem
+        ts_sec = (
+            frame_timestamps.get(frame_stem, float(i))
+            if frame_timestamps
+            else float(i)
+        )
+
+        # Load image safely -- skip corrupt/unreadable frames
+        try:
+            pil_image = Image.open(img_path).convert("RGB")
+        except Exception as load_err:
+            if progress_callback:
+                progress_callback(
+                    (i + 1) / len(image_paths),
+                    f"Depth frame {i + 1}/{len(image_paths)}: SKIPPED ({load_err})",
+                )
+            continue
+
+        img_w, img_h = pil_image.size  # PIL gives (width, height)
+
+        # Run inference
+        try:
+            result = pipe(pil_image)
+        except Exception as inf_err:
+            if progress_callback:
+                progress_callback(
+                    (i + 1) / len(image_paths),
+                    f"Depth frame {i + 1}/{len(image_paths)}: INFERENCE ERROR ({inf_err})",
+                )
+            continue
+
+        # Extract float32 predicted depth tensor
+        # result["predicted_depth"] is torch.Tensor (H, W) float32.
+        # Normalise to [0, 1]: 0 = furthest, 1 = nearest.
+        predicted_depth = result["predicted_depth"]
+        depth_float = predicted_depth.detach().float().numpy()  # (H, W) float32
+
+        d_min = float(depth_float.min())
+        d_max = float(depth_float.max())
+        if d_max > d_min:
+            depth_norm = (depth_float - d_min) / (d_max - d_min)
+        else:
+            depth_norm = np.zeros_like(depth_float)
+
+        # Save lossless float32 .npy
+        npy_path = output_dir / f"depth_{frame_stem}.npy"
+        np.save(str(npy_path), depth_norm.astype(np.float32))
+
+        # Save uint8 PNG visualization (backward-compatible)
+        depth_vis_pil = result["depth"]  # PIL Image, mode L, uint8
+        png_path = output_dir / f"depth_{frame_stem}.png"
+        depth_vis_pil.save(str(png_path))
+        depth_png_paths.append(png_path)
+
+        # Accumulate metadata record
+        metadata_records.append({
+            "frame_id": frame_stem,
+            "source_filename": img_path.name,
+            "timestamp_sec": round(ts_sec, 4),
+            "width": img_w,
+            "height": img_h,
+            "depth_npy": npy_path.name,
+            "depth_png": png_path.name,
+            "depth_min_raw": round(d_min, 6),
+            "depth_max_raw": round(d_max, 6),
+            "model": _DEPTH_MODEL_ID,
+            "depth_type": "relative",
+        })
 
         if progress_callback:
-            progress_callback(i / len(image_paths), f"Depth map {i}/{len(image_paths)}")
+            progress_callback(
+                (i + 1) / len(image_paths),
+                f"Depth map {i + 1}/{len(image_paths)}: {frame_stem}",
+            )
 
-    return depth_paths
+    # Write depth_metadata.json
+    metadata_payload = {
+        "model": _DEPTH_MODEL_ID,
+        "depth_type": "relative",
+        "depth_npy_format": "float32 normalized [0=furthest, 1=nearest]",
+        "frames": metadata_records,
+    }
+    meta_path = output_dir / "depth_metadata.json"
+    with open(meta_path, "w", encoding="utf-8") as mf:
+        json.dump(metadata_payload, mf, indent=2)
+
+    return depth_png_paths
 
 
 # ─────────────────────────────────────────────
@@ -373,7 +491,7 @@ def run_depth_on_keyframes(
 # ─────────────────────────────────────────────
 
 def _estimate_intrinsics(w: int, h: int) -> Tuple[float, float, float, float]:
-    """Estimate focal length from image size assuming 70° horizontal FOV."""
+    """Estimate focal length from image size assuming 70 degree horizontal FOV."""
     fov_h_rad = math.radians(70)
     fx = (w / 2.0) / math.tan(fov_h_rad / 2.0)
     fy = fx
@@ -410,7 +528,6 @@ def _optical_flow_delta(
     dx = float(np.median(disp[:, 0]))
     dy = float(np.median(disp[:, 1]))
 
-    # Estimate rotation from angle differences
     angles_prev = np.arctan2(good_prev[:, 1] - prev_gray.shape[0] / 2,
                              good_prev[:, 0] - prev_gray.shape[1] / 2)
     angles_next = np.arctan2(good_next[:, 1] - curr_gray.shape[0] / 2,
@@ -438,7 +555,7 @@ def estimate_point_cloud_and_trajectory(
 
     Each frame contributes dense colored 3D points by:
       1. Sampling pixels uniformly (or using depth saliency for richer coverage).
-      2. Unprojecting (u, v, d) → (X, Y, Z) using estimated camera intrinsics.
+      2. Unprojecting (u, v, d) to (X, Y, Z) using estimated camera intrinsics.
       3. Transforming into a shared world frame using accumulated camera poses.
 
     Returns the list of recovered camera poses and the total point count.
@@ -451,37 +568,44 @@ def estimate_point_cloud_and_trajectory(
 
     # Accumulated camera pose (simple integrated visual odometry)
     cam_pos   = np.zeros(3, dtype=np.float64)
-    cam_yaw   = 0.0          # radians in the XZ plane
+    cam_yaw   = 0.0
     cam_pitch = 0.0
 
     prev_gray: Optional[np.ndarray] = None
 
     for idx, (img_p, dep_p) in enumerate(zip(image_paths, depth_paths)):
-        # ── Load RGB & depth ──────────────────────────────────────────────
         img_bgr = cv2.imread(str(img_p))
         if img_bgr is None:
             continue
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
         h, w = img_bgr.shape[:2]
 
-        depth_pil = Image.open(dep_p)
-        depth_arr = np.array(
-            depth_pil.resize((w, h), Image.BILINEAR)
-        ).astype(np.float64) / 255.0   # Normalised 0–1 (deeper = smaller value in DA V2)
+        # Load depth -- prefer .npy (float32 normalized) if available
+        npy_path = dep_p.parent / (dep_p.stem + ".npy")
+        if npy_path.exists():
+            depth_arr = np.load(str(npy_path)).astype(np.float64)
+            # Resize if needed
+            if depth_arr.shape != (h, w):
+                from PIL import Image as _PIL
+                depth_pil = _PIL.fromarray(depth_arr.astype(np.float32))
+                depth_arr = np.array(
+                    depth_pil.resize((w, h), Image.BILINEAR)
+                ).astype(np.float64)
+        else:
+            depth_pil = Image.open(dep_p)
+            depth_arr = np.array(
+                depth_pil.resize((w, h), Image.BILINEAR)
+            ).astype(np.float64) / 255.0
 
         curr_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 
-        # ── Optical-flow camera motion ────────────────────────────────────
         if prev_gray is not None:
             dx_px, dy_px, dtheta = _optical_flow_delta(prev_gray, curr_gray)
-
-            # Scale pixel displacement to world units (empirical scale)
             world_scale = 0.012
             step_x =  dx_px * world_scale
-            step_y = -dy_px * world_scale * 0.5   # altitude changes slowly
-            step_z =  0.6 + abs(dy_px) * 0.003    # forward motion per segment
+            step_y = -dy_px * world_scale * 0.5
+            step_z =  0.6 + abs(dy_px) * 0.003
 
-            # Apply rotation & translation
             cam_yaw   += dtheta * 0.15
             cam_pitch += dy_px * 0.0001
 
@@ -499,10 +623,8 @@ def estimate_point_cloud_and_trajectory(
         })
         prev_gray = curr_gray
 
-        # ── Unproject dense pixels into 3D ────────────────────────────────
         fx, fy, cx, cy = _estimate_intrinsics(w, h)
 
-        # Sample pixel grid (denser in high-depth-gradient regions)
         stride = max(4, int(math.sqrt(h * w / max_points_per_frame)))
         ys, xs = np.meshgrid(
             np.arange(0, h, stride),
@@ -512,30 +634,24 @@ def estimate_point_cloud_and_trajectory(
         ys = ys.flatten()
         xs = xs.flatten()
 
-        # Depth values — invert because Depth Anything V2 stores
-        # higher values for closer pixels when saved as greyscale PNG
-        d_raw = depth_arr[ys, xs]                    # 0 = far, 1 = close
-        metric_z = (1.5 + (1.0 - d_raw) * 3.5)      # map to 1.5 – 5.0 scene units
+        d_raw = depth_arr[ys, xs]
+        metric_z = (1.5 + (1.0 - d_raw) * 3.5)
 
-        # Filter: skip very far / unreliable depth estimates
         valid = (metric_z > 0.5) & (metric_z < 6.0)
         ys, xs, metric_z = ys[valid], xs[valid], metric_z[valid]
 
         if len(ys) == 0:
             continue
 
-        # Camera-space 3D coords
         x_cam = (xs - cx) * metric_z / fx
         y_cam = (ys - cy) * metric_z / fy
         z_cam = metric_z
 
-        # Rotate from camera to world using yaw only (simplified)
         cos_y, sin_y = math.cos(cam_yaw), math.sin(cam_yaw)
         x_world = x_cam * cos_y - z_cam * sin_y + cam_pos[0]
-        y_world = y_cam                             + cam_pos[1]
-        z_world = x_cam * sin_y + z_cam * cos_y   + cam_pos[2]
+        y_world = y_cam                            + cam_pos[1]
+        z_world = x_cam * sin_y + z_cam * cos_y  + cam_pos[2]
 
-        # RGB from image
         r = img_rgb[ys, xs, 0].astype(np.uint8)
         g = img_rgb[ys, xs, 1].astype(np.uint8)
         b = img_rgb[ys, xs, 2].astype(np.uint8)
@@ -557,17 +673,15 @@ def estimate_point_cloud_and_trajectory(
         all_pts    = [[0.0, 0.0, 0.0]]
         all_colors = [[200, 200, 200]]
 
-    pts_arr  = np.array(all_pts,   dtype=np.float32)
+    pts_arr  = np.array(all_pts,    dtype=np.float32)
     cols_arr = np.array(all_colors, dtype=np.uint8)
 
-    # Subsample to keep PLY manageable for web rendering
     max_total = 60_000
     if len(pts_arr) > max_total:
         idx_s = np.random.choice(len(pts_arr), max_total, replace=False)
         pts_arr  = pts_arr[idx_s]
         cols_arr = cols_arr[idx_s]
 
-    # Remove extreme outlier points (beyond 3σ in each axis)
     for ax in range(3):
         col = pts_arr[:, ax]
         mu, sigma = col.mean(), col.std()
@@ -576,7 +690,6 @@ def estimate_point_cloud_and_trajectory(
             pts_arr  = pts_arr[keep]
             cols_arr = cols_arr[keep]
 
-    # Write PLY
     vertices = np.zeros(
         len(pts_arr),
         dtype=[

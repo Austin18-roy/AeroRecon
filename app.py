@@ -489,17 +489,24 @@ if is_custom_mode:
                             f"| Metadata: outputs/video_detections/detections.jsonl"
                         )
 
-                        # ── Stage 1c: Depth Anything V2 ───────────────────
+                        # ── Stage 2: Depth Anything V2 ──────────────────────
                         status_text.markdown(
-                            "🧠 **Stage 1c — Depth Anything V2:** Estimating relative surface depth for extracted frames..."
+                            "🧠 **Stage 2 — Depth Anything V2:** Estimating relative surface depth "
+                            "(saving float32 .npy + PNG visualization)..."
                         )
                         VIDEO_DEPTH_DIR.mkdir(parents=True, exist_ok=True)
                         depth_paths = run_depth_on_keyframes(
                             image_paths=img_paths,
                             output_dir=VIDEO_DEPTH_DIR,
+                            frame_timestamps=_frame_ts_map,
                             progress_callback=lambda p, _: overall_bar.progress(0.40 + p * 0.25),
                         )
-                        st.success(f"✓ Stage 1c complete — {len(depth_paths)} depth maps saved into outputs/video_depth/")
+                        st.success(
+                            f"✓ Stage 2 complete — {len(depth_paths)} depth maps "
+                            f"| .npy float32 + PNG visualization "
+                            f"| Metadata: outputs/video_depth/depth_metadata.json"
+                        )
+
 
                         # ── Stage 2: 3D Reconstruction (NuRec / VGGT-Ω / VGGT / AnySplat / Baseline) ──
                         if is_nurec_mode:
